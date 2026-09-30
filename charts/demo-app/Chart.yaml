@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: demo-app
+description: Demo application - two Angie versions (web-v1, web-v2) for canary routing
+type: application
+version: 0.1.0

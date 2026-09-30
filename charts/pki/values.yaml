@@ -1,0 +1,13 @@
+---
+# Bootstrap issuer that signs only the root CA certificate.
+selfSignedIssuer: selfsigned
+
+ca:
+  # ClusterIssuer that signs every other certificate in the cluster.
+  issuerName: demo-ca
+  commonName: demo.local root CA
+  # Keypair Secret; lives in the cert-manager namespace, which is where a
+  # ClusterIssuer looks for it.
+  secretName: demo-ca-keypair
+  duration: 87600h # 10 years
+  renewBefore: 720h

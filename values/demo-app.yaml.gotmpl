@@ -1,0 +1,5 @@
+image:
+  tag: {{ printf "%s-minimal" .Values.versions.ANGIE_VERSION | quote }}
+
+serviceMonitor:
+  enabled: {{ .Values.serviceMonitors }}

@@ -1,0 +1,39 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.selfSignedIssuer }}
+  labels:
+    {{- include "pki.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ca.issuerName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pki.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ .Values.ca.commonName | quote }}
+  secretName: {{ .Values.ca.secretName }}
+  duration: {{ .Values.ca.duration }}
+  renewBefore: {{ .Values.ca.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: {{ .Values.selfSignedIssuer }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.ca.issuerName }}
+  labels:
+    {{- include "pki.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ .Values.ca.secretName }}

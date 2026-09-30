@@ -1,0 +1,30 @@
+{{- /* Services referenced by routes, grouped by namespace. */}}
+{{- $grants := dict }}
+{{- $appServices := list .Values.app.stable.service .Values.app.canary.service }}
+{{- $_ := set $grants .Values.app.namespace $appServices }}
+{{- range .Values.uiRoutes }}
+{{-   $current := get $grants .namespace | default list }}
+{{-   $_ := set $grants .namespace (append $current .service) }}
+{{- end }}
+{{- range $namespace, $services := $grants }}
+---
+# Allows HTTPRoutes in the gateway namespace to use these Services.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ printf "routes-from-%s" $.Release.Namespace }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "gateway.labels" $ | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $.Release.Namespace }}
+  to:
+    {{- range $services | uniq | sortAlpha }}
+    - group: ""
+      kind: Service
+      name: {{ . }}
+    {{- end }}
+{{- end }}

@@ -27,6 +27,18 @@ environments:
         # Prometheus Operator CRDs are installed together with
         # kube-prometheus-stack; ServiceMonitors stay off until then.
         serviceMonitors: false
+        # Demo domain served by the Gateway (certificate: <domain>, *.<domain>).
+        domain: demo.local
+        # Gateway "public" and its routes live in this namespace.
+        gateway:
+          namespace: gateway
+          name: public
+        # htpasswd Secret (gateway namespace) for basic auth on UI routes.
+        # Generated on first deploy by scripts/ensure-basic-auth.sh, never
+        # stored in git.
+        basicAuth:
+          secretName: ui-basic-auth
+          username: admin
 
 ---
 helmDefaults:
@@ -39,6 +51,8 @@ helmDefaults:
 repositories:
   - name: cilium
     url: https://helm.cilium.io
+  - name: jetstack
+    url: https://charts.jetstack.io
 
 releases:
   - name: cilium
@@ -58,3 +72,86 @@ releases:
       - kube-system/cilium
     values:
       - values/local-path-provisioner.yaml.gotmpl
+
+  # Namespaces with Pod Security Admission labels. They must exist before the
+  # releases that live in them (Helm keeps its release record there).
+  - name: namespaces
+    namespace: kube-system
+    chart: ./charts/namespaces
+    needs:
+      - kube-system/cilium
+    values:
+      - values/namespaces.yaml.gotmpl
+
+  # CRDs come with the chart (crds.enabled); the post-install API check job
+  # waits until the webhook serves requests, so issuers can be created next.
+  - name: cert-manager
+    namespace: cert-manager
+    chart: jetstack/cert-manager
+    version: {{ printf "v%s" .Values.versions.CERT_MANAGER_VERSION | quote }}
+    needs:
+      - kube-system/cilium
+    values:
+      - values/cert-manager.yaml.gotmpl
+
+  # Self-signed root -> CA ClusterIssuer "demo-ca". The resources use
+  # cert-manager CRDs, so the first diff runs without cluster validation.
+  - name: pki
+    namespace: cert-manager
+    chart: ./charts/pki
+    disableValidationOnInstall: true
+    needs:
+      - cert-manager/cert-manager
+    values:
+      - values/pki.yaml.gotmpl
+
+  # Controller plus Gateway API and Envoy Gateway CRDs.
+  - name: envoy-gateway
+    namespace: envoy-gateway-system
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    version: {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
+    needs:
+      - kube-system/cilium
+
+  # Angie web-v1 / web-v2 behind the Gateway.
+  - name: demo-app
+    namespace: demo
+    chart: ./charts/demo-app
+    needs:
+      - kube-system/namespaces
+    values:
+      - values/demo-app.yaml.gotmpl
+
+  # EnvoyProxy, GatewayClass, Gateway, TLS certificate, routes and policies.
+  - name: gateway
+    namespace: {{ .Values.gateway.namespace }}
+    chart: ./charts/gateway
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - cert-manager/pki
+      - envoy-gateway-system/envoy-gateway
+      - demo/demo-app
+    values:
+      - values/gateway.yaml.gotmpl
+    hooks:
+      # Runs only when the release is installed or changed; the script never
+      # replaces an existing Secret.
+      - events: ["presync"]
+        showlogs: true
+        command: ./scripts/ensure-basic-auth.sh
+        args:
+          - {{ .Values.gateway.namespace | quote }}
+          - {{ .Values.basicAuth.secretName | quote }}
+          - {{ .Values.basicAuth.username | quote }}
+      # Helm does not wait for custom resources; finish only when Envoy is
+      # deployed and the Gateway has its address.
+      - events: ["postsync"]
+        showlogs: true
+        command: kubectl
+        args:
+          - {{ printf "--namespace=%s" .Values.gateway.namespace | quote }}
+          - wait
+          - --for=condition=Programmed
+          - --timeout=300s
+          - {{ printf "gateway/%s" .Values.gateway.name | quote }}

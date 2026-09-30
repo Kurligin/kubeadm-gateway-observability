@@ -1,0 +1,84 @@
+---
+# Every hostname below is <name>.<domain>; the certificate covers <domain>
+# and *.<domain>.
+domain: demo.local
+
+gatewayClassName: eg
+
+envoyProxy:
+  name: node-lb
+  # Envoy Gateway looks up parametersRef in its own namespace.
+  namespace: envoy-gateway-system
+  # Cilium node IPAM: the LoadBalancer address is the node IP.
+  loadBalancerClass: io.cilium/node
+  externalTrafficPolicy: Cluster
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+gateway:
+  name: public
+  tls:
+    # Secret with the certificate, issued by cert-manager.
+    secretName: demo-tls
+    clusterIssuer: demo-ca
+
+# Keep an incoming X-Request-ID (so a caller can trace its own request) or
+# generate one. Envoy passes it to the backend in the X-Request-ID header.
+requestID: PreserveOrGenerate
+
+app:
+  host: app
+  # Backends live in this namespace; a ReferenceGrant there allows the
+  # routes in the gateway namespace to reach them.
+  namespace: demo
+  port: 80
+  stable:
+    service: web-v1
+    weight: 90
+  canary:
+    service: web-v2
+    weight: 10
+  # Always routed to the canary version.
+  canaryPath: /v2
+  canaryHeader:
+    name: X-Canary
+    value: "true"
+  # Applied to the whole application route.
+  trafficPolicy:
+    requestTimeout: 10s
+    connectTimeout: 2s
+    retry:
+      numRetries: 2
+      perRetryTimeout: 3s
+      triggers:
+        - 5xx
+        - connect-failure
+        - reset
+    # Flood guard per Envoy replica, far above normal and test traffic.
+    rateLimit:
+      requests: 500
+      unit: Second
+  # Separate path with a tight limit to demonstrate HTTP 429 on demand.
+  limited:
+    path: /limited
+    rateLimit:
+      requests: 10
+      unit: Minute
+
+# htpasswd Secret in the release namespace (key ".htpasswd"), created by
+# scripts/ensure-basic-auth.sh. Used by UI routes with basicAuth: true.
+basicAuth:
+  secretName: ui-basic-auth
+
+# Extra HTTPS routes to cluster UIs, hostname = <host>.<domain>:
+#   - host: grafana
+#     namespace: monitoring
+#     service: kube-prometheus-stack-grafana
+#     port: 80
+#     basicAuth: false
+uiRoutes: []

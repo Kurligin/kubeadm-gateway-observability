@@ -1,0 +1,16 @@
+{{- range .Values.versions }}
+{{- $ctx := dict "root" $ "item" . }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "demo-app.labels" $ctx | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" $ctx | nindent 6 }}
+{{- end }}

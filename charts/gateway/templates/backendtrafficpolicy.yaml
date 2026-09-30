@@ -1,0 +1,35 @@
+{{- $policy := .Values.app.trafficPolicy }}
+{{- range $route, $limit := dict "app" $policy.rateLimit "app-limited" .Values.app.limited.rateLimit }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $route }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "gateway.labels" $ | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $route }}
+  timeout:
+    tcp:
+      connectTimeout: {{ $policy.connectTimeout }}
+    http:
+      requestTimeout: {{ $policy.requestTimeout }}
+  retry:
+    numRetries: {{ $policy.retry.numRetries }}
+    perRetry:
+      timeout: {{ $policy.retry.perRetryTimeout }}
+    retryOn:
+      triggers:
+        {{- toYaml $policy.retry.triggers | nindent 8 }}
+  # Local token bucket in each Envoy replica; over the limit -> HTTP 429.
+  rateLimit:
+    local:
+      rules:
+        - limit:
+            requests: {{ $limit.requests }}
+            unit: {{ $limit.unit }}
+{{- end }}

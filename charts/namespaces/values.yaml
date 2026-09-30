@@ -1,0 +1,8 @@
+---
+# Pod Security Standards version pinned in the labels ("latest" or "v1.36").
+podSecurityVersion: latest
+
+# Namespaces owned by this chart:
+#   - name: demo
+#     podSecurity: restricted   # privileged | baseline | restricted
+namespaces: []

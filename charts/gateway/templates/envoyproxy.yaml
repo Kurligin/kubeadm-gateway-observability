@@ -1,0 +1,53 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ .Values.envoyProxy.name }}
+  namespace: {{ .Values.envoyProxy.namespace }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: {{ .Values.envoyProxy.replicas }}
+        container:
+          resources:
+            {{- toYaml .Values.envoyProxy.resources | nindent 12 }}
+      envoyService:
+        type: LoadBalancer
+        loadBalancerClass: {{ .Values.envoyProxy.loadBalancerClass }}
+        externalTrafficPolicy: {{ .Values.envoyProxy.externalTrafficPolicy }}
+  telemetry:
+    # JSON access log to stdout, collected together with the pod logs.
+    accessLog:
+      settings:
+        - format:
+            type: JSON
+            json:
+              time: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              uri: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              protocol: "%PROTOCOL%"
+              status: "%RESPONSE_CODE%"
+              response_flags: "%RESPONSE_FLAGS%"
+              duration_ms: "%DURATION%"
+              upstream_duration_ms: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+              bytes_received: "%BYTES_RECEIVED%"
+              bytes_sent: "%BYTES_SENT%"
+              host: "%REQ(:AUTHORITY)%"
+              x_request_id: "%REQ(X-REQUEST-ID)%"
+              x_forwarded_for: "%REQ(X-FORWARDED-FOR)%"
+              user_agent: "%REQ(USER-AGENT)%"
+              remote_addr: "%DOWNSTREAM_REMOTE_ADDRESS%"
+              upstream_host: "%UPSTREAM_HOST%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              route: "%ROUTE_NAME%"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
+    # Prometheus endpoint of every Envoy pod (:19001/stats/prometheus).
+    metrics:
+      prometheus:
+        disable: false

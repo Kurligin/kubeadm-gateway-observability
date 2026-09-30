@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: pki
+description: Self-signed root CA and the "demo-ca" ClusterIssuer (cert-manager)
+type: application
+version: 0.1.0

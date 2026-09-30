@@ -1,0 +1,63 @@
+---
+image:
+  repository: docker.angie.software/angie
+  # Required; set from versions.env (ANGIE_VERSION) by helmfile.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# One Deployment + Service + ConfigMap per entry, same image, different config.
+versions:
+  - name: web-v1
+    version: v1
+  - name: web-v2
+    version: v2
+
+replicaCount: 2
+
+ports:
+  # Unprivileged ports: the container runs as a non-root user.
+  http: 8080
+  metrics: 9113
+
+service:
+  port: 80
+
+angie:
+  workerProcesses: 1
+  workerConnections: 1024
+
+# User "angie" from the image (uid 100, gid 101).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+podDisruptionBudget:
+  minAvailable: 1
+
+# Seconds to keep serving after the pod is marked for deletion, so the
+# gateway stops sending traffic before Angie exits.
+preStopSleepSeconds: 5
+
+# Needs the Prometheus Operator CRDs (installed with kube-prometheus-stack).
+serviceMonitor:
+  enabled: false
+  interval: 30s

@@ -1,0 +1,7 @@
+domain: {{ .Values.domain | quote }}
+
+gateway:
+  name: {{ .Values.gateway.name | quote }}
+
+basicAuth:
+  secretName: {{ .Values.basicAuth.secretName | quote }}

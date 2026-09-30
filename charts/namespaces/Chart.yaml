@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: namespaces
+description: Application namespaces with Pod Security Admission labels
+type: application
+version: 0.1.0

@@ -1,0 +1,20 @@
+{{- range .Values.namespaces }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .name }}
+  annotations:
+    # Uninstalling the release must not delete the workloads inside.
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    {{- with .podSecurity }}
+    pod-security.kubernetes.io/enforce: {{ . }}
+    pod-security.kubernetes.io/enforce-version: {{ $.Values.podSecurityVersion }}
+    pod-security.kubernetes.io/audit: {{ . }}
+    pod-security.kubernetes.io/audit-version: {{ $.Values.podSecurityVersion }}
+    pod-security.kubernetes.io/warn: {{ . }}
+    pod-security.kubernetes.io/warn-version: {{ $.Values.podSecurityVersion }}
+    {{- end }}
+{{- end }}
