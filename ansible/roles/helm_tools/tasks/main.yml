@@ -1,0 +1,89 @@
+---
+- name: Create download cache directory
+  ansible.builtin.file:
+    path: "{{ download_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download helm and helmfile releases
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ download_cache_dir }}/{{ item.url | basename }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ helm_tools_artifacts }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.version }}"
+
+- name: Create release directories
+  ansible.builtin.file:
+    path: "{{ helm_tools_install_root }}/{{ item.name }}/{{ item.version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ helm_tools_artifacts }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.version }}"
+
+- name: Unpack helm and helmfile releases
+  ansible.builtin.unarchive:
+    src: "{{ download_cache_dir }}/{{ item.url | basename }}"
+    dest: "{{ helm_tools_install_root }}/{{ item.name }}/{{ item.version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ helm_tools_install_root }}/{{ item.name }}/{{ item.version }}/{{ item.binary }}"
+  loop: "{{ helm_tools_artifacts }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.version }}"
+
+- name: Link helm and helmfile into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ helm_tools_install_root }}/{{ item.name }}/{{ item.version }}/{{ item.binary }}"
+    dest: "/usr/local/bin/{{ item.name }}"
+    state: link
+    force: true
+  loop: "{{ helm_tools_artifacts }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.version }}"
+
+- name: Download helm-diff plugin
+  ansible.builtin.get_url:
+    url: "{{ helm_tools_helm_diff_url }}"
+    dest: "{{ download_cache_dir }}/helm-diff-{{ helm_diff_version }}-linux-{{ cpu_arch }}.tgz"
+    checksum: "sha256:{{ helm_diff_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create helm-diff release directory
+  ansible.builtin.file:
+    path: "{{ helm_tools_install_root }}/helm-diff/{{ helm_diff_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The archive already contains the plugin binary (bin/diff), so the plugin
+# install hook that would download it again is not needed.
+- name: Unpack helm-diff plugin
+  ansible.builtin.unarchive:
+    src: "{{ download_cache_dir }}/helm-diff-{{ helm_diff_version }}-linux-{{ cpu_arch }}.tgz"
+    dest: "{{ helm_tools_install_root }}/helm-diff/{{ helm_diff_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ helm_tools_install_root }}/helm-diff/{{ helm_diff_version }}/diff/bin/diff"
+
+# Helm looks for plugins in $HELM_PLUGINS (default ~/.local/share/helm/plugins),
+# which is per user; the plugin is linked for root and the invoking user.
+- name: Register helm-diff plugin for root and the invoking user
+  ansible.builtin.include_tasks: plugin_user.yml
+  loop: "{{ ['root', kube_user] | unique }}"
+  loop_control:
+    loop_var: helm_tools_user

@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# containerd {{ containerd_version }} configuration for kubelet (CRI).
+# Only non-default settings are listed; everything else uses the built-in
+# defaults of this containerd release (`containerd config default`).
+version = 4
+
+root = "/var/lib/containerd"
+state = "/run/containerd"
+
+[grpc]
+  address = "{{ containerd_socket }}"
+
+[plugins]
+  [plugins.'io.containerd.cri.v1.images']
+    snapshotter = "overlayfs"
+
+    [plugins.'io.containerd.cri.v1.images'.pinned_images]
+      sandbox = "{{ k8s_pause_image }}"
+
+  [plugins.'io.containerd.cri.v1.runtime']
+    [plugins.'io.containerd.cri.v1.runtime'.containerd]
+      default_runtime_name = "runc"
+
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+        runtime_type = "io.containerd.runc.v2"
+
+        [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+          BinaryName = "{{ containerd_runc_binary_path }}"
+          # kubelet uses the systemd cgroup driver (KubeletConfiguration).
+          SystemdCgroup = true
+
+    [plugins.'io.containerd.cri.v1.runtime'.cni]
+      bin_dirs = ["/opt/cni/bin"]
+      conf_dir = "/etc/cni/net.d"

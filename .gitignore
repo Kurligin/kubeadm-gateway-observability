@@ -1,0 +1,9 @@
+# Local tooling
+.venv/
+.ansible/
+ansible/collections/
+*.retry
+
+# Generated at runtime
+.cache/
+*.kubeconfig

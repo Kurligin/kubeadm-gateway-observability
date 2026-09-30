@@ -1,0 +1,31 @@
+---
+- name: Look up home directory of {{ helm_tools_user }}
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ helm_tools_user }}"
+
+- name: Create helm plugin directories for {{ helm_tools_user }}
+  ansible.builtin.file:
+    path: "{{ ansible_facts['getent_passwd'][helm_tools_user][4] }}/{{ item }}"
+    state: directory
+    owner: "{{ helm_tools_user }}"
+    group: "{{ ansible_facts['getent_passwd'][helm_tools_user][2] }}"
+    # Symbolic mode: never strips permissions from existing directories.
+    mode: "u+rwx"
+  loop:
+    - .local
+    - .local/share
+    - .local/share/helm
+    - .local/share/helm/plugins
+
+- name: Link helm-diff plugin for {{ helm_tools_user }}
+  ansible.builtin.file:
+    src: "{{ helm_tools_install_root }}/helm-diff/{{ helm_diff_version }}/diff"
+    dest: "{{ ansible_facts['getent_passwd'][helm_tools_user][4] }}/.local/share/helm/plugins/helm-diff"
+    state: link
+    force: true
+    # Own the link itself; following it would chown the shared plugin
+    # directory back and forth between users on every run.
+    follow: false
+    owner: "{{ helm_tools_user }}"
+    group: "{{ ansible_facts['getent_passwd'][helm_tools_user][2] }}"

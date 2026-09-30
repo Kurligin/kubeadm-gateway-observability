@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .venv/
+  - .ansible/
+  - ansible/collections/
+  - charts/
+  - values/
+  - helmfile.yaml.gotmpl
+  - .github/
+
+# Galaxy metadata is not needed for in-repo roles.
+skip_list:
+  - meta-no-info

@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: containerd
+  author: kubeadm-gateway-observability
+  description: Install containerd and runc from the official releases with checksum verification.
+  license: Apache-2.0
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

@@ -1,0 +1,23 @@
+---
+# Only linux/amd64 checksums are pinned in versions.env.
+cpu_arch: amd64
+
+# Downloaded release artifacts are cached here (checksummed, reused on rerun).
+download_cache_dir: /var/cache/kubeadm-gateway
+
+# API server advertise address. Priority: inventory/host var `node_ip`,
+# then the NODE_IP environment variable, then the IPv4 address of the
+# interface that holds the default route.
+node_ip_override: "{{ lookup('ansible.builtin.env', 'NODE_IP') }}"
+
+# User that receives ~/.kube/config and the helm-diff plugin besides root:
+# the SSH login user for remote hosts, otherwise the user that invoked
+# `sudo`/`make` on this machine.
+kube_user: >-
+  {{ ansible_user
+     | default(lookup('ansible.builtin.env', 'SUDO_USER'), true)
+     | default(lookup('ansible.builtin.env', 'USER'), true) }}
+
+# Single-node cluster: allow workloads on the control plane and let Cilium
+# node IPAM use this node for LoadBalancer Services.
+k8s_single_node: true

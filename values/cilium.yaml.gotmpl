@@ -1,0 +1,62 @@
+# Cilium as the only CNI, replacing kube-proxy. Gateway API is served by
+# Envoy Gateway, so Cilium's own Gateway API / Ingress stay disabled.
+kubeProxyReplacement: true
+k8sServiceHost: {{ .Values.nodeIP | quote }}
+k8sServicePort: 6443
+
+ipam:
+  mode: kubernetes
+
+# LoadBalancer Services with loadBalancerClass io.cilium/node get the node IP
+# as their external address (no address pools to configure).
+nodeIPAM:
+  enabled: true
+
+operator:
+  replicas: 1
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: {{ .Values.serviceMonitors }}
+
+# Restart Cilium pods when the Cilium ConfigMap changes.
+rollOutCiliumPods: true
+
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: {{ .Values.serviceMonitors }}
+    trustCRDsExist: {{ .Values.serviceMonitors }}
+
+envoy:
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: {{ .Values.serviceMonitors }}
+
+hubble:
+  enabled: true
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+      - dns
+      - drop
+      - tcp
+      - flow
+      - port-distribution
+      - icmp
+      - "httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction"
+    serviceMonitor:
+      enabled: {{ .Values.serviceMonitors }}
+  relay:
+    enabled: true
+    prometheus:
+      enabled: true
+      serviceMonitor:
+        enabled: {{ .Values.serviceMonitors }}
+  tls:
+    auto:
+      # Certificates are generated in-cluster by a CronJob instead of by Helm
+      # templates: Helm would render new certificates on every run and break
+      # the "no changes on re-deploy" guarantee.
+      method: cronJob

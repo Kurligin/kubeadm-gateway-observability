@@ -1,0 +1,25 @@
+---
+helm_tools_install_root: /opt/helm-tools
+
+helm_tools_helm_url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-{{ cpu_arch }}.tar.gz"
+helm_tools_helmfile_url: >-
+  https://github.com/helmfile/helmfile/releases/download/v{{ helmfile_version
+  }}/helmfile_{{ helmfile_version }}_linux_{{ cpu_arch }}.tar.gz
+helm_tools_helm_diff_url: >-
+  https://github.com/databus23/helm-diff/releases/download/v{{ helm_diff_version
+  }}/helm-diff-linux-{{ cpu_arch }}.tgz
+
+# Every tool release is unpacked into its own versioned directory; the
+# active version is selected by a symlink. This keeps reruns idempotent and
+# makes upgrades a matter of bumping versions.env.
+helm_tools_artifacts:
+  - name: helm
+    version: "{{ helm_version }}"
+    url: "{{ helm_tools_helm_url }}"
+    sha256: "{{ helm_sha256 }}"
+    binary: "linux-{{ cpu_arch }}/helm"
+  - name: helmfile
+    version: "{{ helmfile_version }}"
+    url: "{{ helm_tools_helmfile_url }}"
+    sha256: "{{ helmfile_sha256 }}"
+    binary: helmfile

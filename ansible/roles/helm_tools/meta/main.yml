@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: helm_tools
+  author: kubeadm-gateway-observability
+  description: Install pinned helm, helmfile and the helm-diff plugin.
+  license: Apache-2.0
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

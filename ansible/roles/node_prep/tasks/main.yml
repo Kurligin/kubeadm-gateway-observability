@@ -1,0 +1,87 @@
+---
+- name: Check the operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['architecture'] == 'x86_64'
+    fail_msg: >-
+      Supported target: Ubuntu 24.04 on x86_64 (got {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }} on {{ ansible_facts['architecture'] }}).
+    quiet: true
+
+- name: Warn about an untested Ubuntu release
+  ansible.builtin.debug:
+    msg: "Tested on Ubuntu 24.04, this host runs {{ ansible_facts['distribution_version'] }}; continuing."
+  when: ansible_facts['distribution_version'] != '24.04'
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ node_prep_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: "{{ node_prep_apt_lock_timeout }}"
+
+- name: Load kernel modules on boot
+  ansible.builtin.template:
+    src: modules-load.conf.j2
+    dest: /etc/modules-load.d/kubernetes.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check which kernel modules are loaded
+  ansible.builtin.stat:
+    path: "/sys/module/{{ item }}"
+  loop: "{{ node_prep_kernel_modules }}"
+  register: node_prep_module_state
+
+- name: Load missing kernel modules
+  ansible.builtin.command:
+    cmd: "modprobe {{ item.item }}"
+  loop: "{{ node_prep_module_state.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+
+- name: Persist sysctl settings
+  ansible.builtin.template:
+    src: sysctl.conf.j2
+    dest: /etc/sysctl.d/99-kubernetes.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read current sysctl values
+  ansible.builtin.command:
+    cmd: "sysctl -n {{ node_prep_sysctl.keys() | join(' ') }}"
+  register: node_prep_sysctl_current
+  changed_when: false
+
+# Applied only when the running kernel differs from the desired state, so
+# the task is idempotent and also repairs values changed by someone else.
+- name: Apply sysctl settings
+  ansible.builtin.command:
+    cmd: sysctl --system
+  when: node_prep_sysctl_current.stdout_lines != (node_prep_sysctl.values() | list)
+  changed_when: true
+
+# kubelet refuses to start with swap enabled (failSwapOn defaults to true).
+# Swap is disabled both at runtime and permanently in /etc/fstab. Swap that
+# is not declared in fstab (e.g. a swapfile enabled by cloud provisioning on CI
+# runners) is still switched off at runtime by `swapoff -a`.
+- name: Disable swap at runtime
+  ansible.builtin.command:
+    cmd: swapoff -a
+  when: ansible_facts['memory_mb']['swap']['total'] | int > 0
+  changed_when: true
+
+- name: Disable swap in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    # Single-line match only: character classes exclude newlines, otherwise
+    # a match could start on a previous fstab entry.
+    regexp: '^([^#\s][^#\n]*[ \t]swap[ \t][^\n]*)$'
+    replace: '# \1'
+    backup: true

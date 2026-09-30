@@ -1,0 +1,2 @@
+# Runtime Python dependencies (installed into .venv by deploy.sh).
+ansible-core==2.18.19

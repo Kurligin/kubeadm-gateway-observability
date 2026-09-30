@@ -1,0 +1,23 @@
+---
+# Every version below is read from versions.env at the repository root, so
+# the Makefile, Ansible and helmfile share one source of truth.
+versions_file: "{{ playbook_dir }}/../versions.env"
+
+k8s_version: "{{ lookup('ansible.builtin.ini', 'K8S_VERSION', type='properties', file=versions_file) }}"
+k8s_minor: "{{ lookup('ansible.builtin.ini', 'K8S_MINOR', type='properties', file=versions_file) }}"
+k8s_pkg_version: "{{ lookup('ansible.builtin.ini', 'K8S_PKG_VERSION', type='properties', file=versions_file) }}"
+k8s_pause_image: "{{ lookup('ansible.builtin.ini', 'PAUSE_IMAGE', type='properties', file=versions_file) }}"
+k8s_pod_subnet: "{{ lookup('ansible.builtin.ini', 'POD_SUBNET', type='properties', file=versions_file) }}"
+k8s_service_subnet: "{{ lookup('ansible.builtin.ini', 'SERVICE_SUBNET', type='properties', file=versions_file) }}"
+
+containerd_version: "{{ lookup('ansible.builtin.ini', 'CONTAINERD_VERSION', type='properties', file=versions_file) }}"
+containerd_sha256: "{{ lookup('ansible.builtin.ini', 'CONTAINERD_SHA256', type='properties', file=versions_file) }}"
+runc_version: "{{ lookup('ansible.builtin.ini', 'RUNC_VERSION', type='properties', file=versions_file) }}"
+runc_sha256: "{{ lookup('ansible.builtin.ini', 'RUNC_SHA256', type='properties', file=versions_file) }}"
+
+helm_version: "{{ lookup('ansible.builtin.ini', 'HELM_VERSION', type='properties', file=versions_file) }}"
+helm_sha256: "{{ lookup('ansible.builtin.ini', 'HELM_SHA256', type='properties', file=versions_file) }}"
+helmfile_version: "{{ lookup('ansible.builtin.ini', 'HELMFILE_VERSION', type='properties', file=versions_file) }}"
+helmfile_sha256: "{{ lookup('ansible.builtin.ini', 'HELMFILE_SHA256', type='properties', file=versions_file) }}"
+helm_diff_version: "{{ lookup('ansible.builtin.ini', 'HELM_DIFF_VERSION', type='properties', file=versions_file) }}"
+helm_diff_sha256: "{{ lookup('ansible.builtin.ini', 'HELM_DIFF_SHA256', type='properties', file=versions_file) }}"

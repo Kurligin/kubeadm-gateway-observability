@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+{% for module in node_prep_kernel_modules %}
+{{ module }}
+{% endfor %}

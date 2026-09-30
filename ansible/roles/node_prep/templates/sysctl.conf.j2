@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+{% for key, value in node_prep_sysctl.items() %}
+{{ key }} = {{ value }}
+{% endfor %}

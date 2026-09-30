@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: kube_packages
+  author: kubeadm-gateway-observability
+  description: Install pinned kubeadm, kubelet and kubectl from pkgs.k8s.io and hold them.
+  license: Apache-2.0
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

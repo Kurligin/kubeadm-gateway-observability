@@ -1,0 +1,11 @@
+---
+# Default inventory: deploy onto the machine where the command is run.
+all:
+  children:
+    control_plane:
+      hosts:
+        localhost:
+          ansible_connection: local
+          # System Python is required for the apt/dpkg bindings; the venv
+          # interpreter only runs the controller side.
+          ansible_python_interpreter: /usr/bin/python3

@@ -1,0 +1,12 @@
+---
+# Node preparation and kubeadm control plane bootstrap.
+# The platform layer (Cilium, storage, ...) is installed by helmfile afterwards.
+- name: Prepare the node and bootstrap the Kubernetes control plane
+  hosts: control_plane
+  become: true
+  roles:
+    - role: node_prep
+    - role: containerd
+    - role: kube_packages
+    - role: kubeadm_init
+    - role: helm_tools

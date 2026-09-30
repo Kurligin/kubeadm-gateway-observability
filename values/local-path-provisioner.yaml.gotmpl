@@ -1,0 +1,20 @@
+image:
+  repository: docker.io/rancher/local-path-provisioner
+  tag: v{{ .Values.versions.LOCAL_PATH_PROVISIONER_VERSION }}
+
+# Upstream default is busybox:latest; pinned for reproducibility.
+helperImage:
+  repository: docker.io/library/busybox
+  tag: {{ .Values.versions.BUSYBOX_IMAGE_TAG | quote }}
+
+storageClass:
+  create: true
+  name: local-path
+  defaultClass: true
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+
+nodePathMap:
+  - node: DEFAULT_PATH_FOR_NON_LISTED_NODES
+    paths:
+      - /opt/local-path-provisioner

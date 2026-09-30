@@ -1,0 +1,18 @@
+---
+containerd_release_url: >-
+  https://github.com/containerd/containerd/releases/download/v{{ containerd_version
+  }}/containerd-{{ containerd_version }}-linux-{{ cpu_arch }}.tar.gz
+containerd_runc_release_url: >-
+  https://github.com/opencontainers/runc/releases/download/v{{ runc_version }}/runc.{{ cpu_arch }}
+
+# Every release is unpacked into its own directory; /usr/local/bin holds
+# symlinks to the active one, so upgrades and reruns are atomic and idempotent.
+containerd_install_root: /opt/containerd
+containerd_binaries:
+  - containerd
+  - containerd-shim-runc-v2
+  - containerd-stress
+  - ctr
+containerd_runc_binary_path: /usr/local/sbin/runc
+
+containerd_socket: /run/containerd/containerd.sock

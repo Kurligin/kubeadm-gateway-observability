@@ -1,0 +1,18 @@
+---
+# Example inventory for deploying onto a remote Ubuntu 24.04 host over SSH.
+# Copy to remote.yml, adjust and run:
+#   make cluster INVENTORY=ansible/inventory/remote.yml
+# The login user needs passwordless sudo (or add --ask-become-pass via
+# ANSIBLE_BECOME_ASK_PASS=true).
+all:
+  children:
+    control_plane:
+      hosts:
+        node1:
+          ansible_host: 203.0.113.10
+          ansible_user: ubuntu
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+          ansible_python_interpreter: /usr/bin/python3
+          # Optional: advertise address of the API server (defaults to the
+          # IPv4 address of the default route interface).
+          # node_ip: 203.0.113.10

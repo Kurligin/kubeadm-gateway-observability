@@ -1,0 +1,63 @@
+---
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The armored key is used as is (apt accepts .asc keyrings), no gpg needed.
+- name: Download Kubernetes apt repository key
+  ansible.builtin.get_url:
+    url: "{{ kube_packages_repo_url }}Release.key"
+    dest: "{{ kube_packages_keyring }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add Kubernetes apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: |
+      # Managed by Ansible (role kube_packages).
+      deb [signed-by={{ kube_packages_keyring }}] {{ kube_packages_repo_url }} /
+    owner: root
+    group: root
+    mode: "0644"
+  register: kube_packages_repo
+
+# Checking the downloaded index (not only whether the repository file
+# changed) also recovers from a run interrupted before the cache refresh.
+- name: Find the Kubernetes repository index
+  ansible.builtin.find:
+    paths: /var/lib/apt/lists
+    patterns: "pkgs.k8s.io_core:_stable:_{{ k8s_minor }}_deb_Packages*"
+  register: kube_packages_index
+
+- name: Refresh apt cache for the Kubernetes repository
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: "{{ kube_packages_apt_lock_timeout }}"
+  when: kube_packages_repo.changed or kube_packages_index.matched == 0
+
+# Exact versions are pinned; held packages are allowed to change only to
+# the pinned version (upgrade path when versions.env is bumped).
+- name: Install kubeadm, kubelet and kubectl
+  ansible.builtin.apt:
+    name: "{{ kube_packages_names | map('regex_replace', '$', '=' ~ k8s_pkg_version) | list }}"
+    state: present
+    allow_change_held_packages: true
+    allow_downgrade: true
+    lock_timeout: "{{ kube_packages_apt_lock_timeout }}"
+
+- name: Hold Kubernetes packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ kube_packages_names }}"
+
+- name: Enable kubelet
+  ansible.builtin.systemd_service:
+    name: kubelet
+    enabled: true

@@ -1,0 +1,60 @@
+# Cluster add-ons, installed after `make cluster`.
+# Run through `make platform` (helmfile apply: diff first, upgrade only what changed).
+#
+# Versions come from versions.env. The node address (Cilium k8sServiceHost)
+# comes from NODE_IP or, if unset, from the API server URL in the current
+# kubeconfig, which kubeadm sets to the advertise address.
+{{- $versions := dict }}
+{{- range $line := readFile "versions.env" | splitList "\n" }}
+{{-   $line = trim $line }}
+{{-   if and (contains "=" $line) (not (hasPrefix "#" $line)) }}
+{{-     $kv := splitn "=" 2 $line }}
+{{-     $_ := set $versions $kv._0 $kv._1 }}
+{{-   end }}
+{{- end }}
+{{- $nodeIP := env "NODE_IP" }}
+{{- if eq $nodeIP "" }}
+{{-   $server := exec "kubectl" (list "config" "view" "--minify" "--output" "jsonpath={.clusters[0].cluster.server}") }}
+{{-   $nodeIP = $server | trimPrefix "https://" | splitList ":" | first }}
+{{- end }}
+
+environments:
+  default:
+    values:
+      - nodeIP: {{ $nodeIP | quote }}
+        versions:
+{{ $versions | toYaml | indent 10 }}
+        # Prometheus Operator CRDs are installed together with
+        # kube-prometheus-stack; ServiceMonitors stay off until then.
+        serviceMonitors: false
+
+---
+helmDefaults:
+  wait: true
+  waitForJobs: true
+  timeout: 900
+  historyMax: 5
+  createNamespace: true
+
+repositories:
+  - name: cilium
+    url: https://helm.cilium.io
+
+releases:
+  - name: cilium
+    namespace: kube-system
+    chart: cilium/cilium
+    version: {{ .Values.versions.CILIUM_VERSION | quote }}
+    values:
+      - values/cilium.yaml.gotmpl
+
+  # kubeadm ships no StorageClass; Prometheus and VictoriaLogs need PVCs.
+  # No official Helm repository exists, so the upstream chart of the same
+  # release is vendored in charts/local-path-provisioner.
+  - name: local-path-provisioner
+    namespace: local-path-storage
+    chart: ./charts/local-path-provisioner
+    needs:
+      - kube-system/cilium
+    values:
+      - values/local-path-provisioner.yaml.gotmpl

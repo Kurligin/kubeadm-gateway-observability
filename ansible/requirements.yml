@@ -1,0 +1,6 @@
+---
+# Ansible collections required by the playbooks.
+# Intentionally empty: all roles use ansible.builtin modules only, so the
+# deployment does not depend on Ansible Galaxy availability.
+# deploy.sh installs whatever is listed here (pinned versions only).
+collections: []

@@ -1,0 +1,120 @@
+---
+# Hosts that already run Docker (for example GitHub-hosted ubuntu-24.04
+# runners) ship containerd from a distribution package: /usr/bin/containerd,
+# /lib/systemd/system/containerd.service and a config.toml with the CRI
+# plugin disabled. Nothing is removed. Instead this role takes over the
+# `containerd.service` name: the unit in /etc/systemd/system overrides the
+# packaged one, points to the pinned binary in /usr/local/bin and to the
+# config rendered below (CRI enabled). Docker keeps working because it talks
+# to the same socket, now served by the pinned containerd.
+- name: Detect a containerd installed from a distribution package
+  ansible.builtin.stat:
+    path: /usr/bin/containerd
+  register: containerd_packaged
+
+- name: Report the packaged containerd takeover
+  ansible.builtin.debug:
+    msg: >-
+      A packaged containerd was found at /usr/bin/containerd (usually from Docker).
+      It is left installed but not used: containerd.service now runs
+      /usr/local/bin/containerd {{ containerd_version }} with the CRI plugin enabled.
+  when: containerd_packaged.stat.exists
+
+- name: Create download cache directory
+  ansible.builtin.file:
+    path: "{{ download_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download containerd release
+  ansible.builtin.get_url:
+    url: "{{ containerd_release_url }}"
+    dest: "{{ download_cache_dir }}/containerd-{{ containerd_version }}-linux-{{ cpu_arch }}.tar.gz"
+    checksum: "sha256:{{ containerd_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create containerd release directory
+  ansible.builtin.file:
+    path: "{{ containerd_install_root }}/{{ containerd_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack containerd release
+  ansible.builtin.unarchive:
+    src: "{{ download_cache_dir }}/containerd-{{ containerd_version }}-linux-{{ cpu_arch }}.tar.gz"
+    dest: "{{ containerd_install_root }}/{{ containerd_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ containerd_install_root }}/{{ containerd_version }}/bin/containerd"
+
+- name: Link containerd binaries into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ containerd_install_root }}/{{ containerd_version }}/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop: "{{ containerd_binaries }}"
+  notify: Restart containerd
+
+- name: Install runc
+  ansible.builtin.get_url:
+    url: "{{ containerd_runc_release_url }}"
+    dest: "{{ containerd_runc_binary_path }}"
+    checksum: "sha256:{{ runc_sha256 }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create containerd configuration directory
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render containerd configuration
+  ansible.builtin.template:
+    src: config.toml.j2
+    dest: /etc/containerd/config.toml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart containerd
+
+- name: Install containerd systemd unit
+  ansible.builtin.template:
+    src: containerd.service.j2
+    dest: /etc/systemd/system/containerd.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart containerd
+
+- name: Enable and start containerd
+  ansible.builtin.systemd_service:
+    name: containerd
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# kubeadm must talk to the final configuration, so pending restarts are
+# executed now rather than at the end of the play.
+- name: Apply pending containerd restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Check that containerd serves the CRI API
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/ctr --address {{ containerd_socket }} plugins ls"
+  register: containerd_plugins
+  changed_when: false
+  failed_when: >-
+    containerd_plugins.rc != 0
+    or (containerd_plugins.stdout_lines | select('search', 'io.containerd.cri.v1\\s+runtime\\s+.*\\s+ok') | list | length) == 0
