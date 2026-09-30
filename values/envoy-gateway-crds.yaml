@@ -1,0 +1,12 @@
+---
+# Values of the gateway-crds-helm chart, rendered by
+# scripts/apply-gateway-crds.sh.
+crds:
+  gatewayAPI:
+    enabled: true
+    # Only standard (GA) Gateway API resources are used: GatewayClass,
+    # Gateway, HTTPRoute, ReferenceGrant. The standard channel also installs
+    # the upstream "safe-upgrades" admission policy.
+    channel: standard
+  envoyGateway:
+    enabled: true

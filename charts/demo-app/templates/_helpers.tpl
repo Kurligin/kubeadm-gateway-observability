@@ -44,7 +44,6 @@ http {
         '"uri":"$request_uri",'
         '"status":$status,'
         '"request_time":$request_time,'
-        '"upstream":"$upstream_addr",'
         '"remote_addr":"$remote_addr",'
         '"x_forwarded_for":"$http_x_forwarded_for",'
         '"x_request_id":"$http_x_request_id",'

@@ -1,0 +1,40 @@
+---
+# Chooses the API server advertise address (kubeadm_init_node_ip).
+#
+# A kubeadm cluster cannot change it after init: certificates, kubeconfigs and
+# Cilium all point to it. For an existing cluster the address is taken from
+# admin.conf (see state.yml, which also rejects an address that is no longer
+# local); an explicitly requested different address is an error rather than a
+# silent half-reconfiguration.
+- name: Use the address of the existing cluster
+  ansible.builtin.set_fact:
+    kubeadm_init_node_ip: "{{ kubeadm_init_existing_ip }}"
+  when: kubeadm_init_cluster_ready
+
+- name: Check that the requested address matches the existing cluster
+  ansible.builtin.assert:
+    that:
+      - kubeadm_init_node_ip_requested in ['', kubeadm_init_node_ip]
+    fail_msg: >-
+      The cluster on this host was created with API server address {{ kubeadm_init_node_ip }},
+      but NODE_IP (or node_ip) requests {{ kubeadm_init_node_ip_requested }}. A kubeadm cluster
+      cannot change its address. Either drop NODE_IP / set it to {{ kubeadm_init_node_ip }}, or
+      recreate the cluster with the new address: `make destroy FORCE=1`, then deploy again.
+      Nothing has been changed.
+    quiet: true
+  when: kubeadm_init_cluster_ready
+
+- name: Use the requested or default address for a new cluster
+  ansible.builtin.set_fact:
+    kubeadm_init_node_ip: "{{ kubeadm_init_node_ip_requested | default(kubeadm_init_node_ip_default, true) }}"
+  when: not kubeadm_init_cluster_ready
+
+- name: Check that the advertise address is a local IPv4 address
+  ansible.builtin.assert:
+    that:
+      - kubeadm_init_node_ip in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      API server address "{{ kubeadm_init_node_ip }}" is not assigned to any interface of this host.
+      Set NODE_IP to one of the local IPv4 addresses: {{ ansible_facts['all_ipv4_addresses'] | join(', ') }}.
+    quiet: true
+  when: not kubeadm_init_cluster_ready

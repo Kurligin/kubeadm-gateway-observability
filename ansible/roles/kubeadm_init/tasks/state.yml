@@ -1,0 +1,102 @@
+---
+# Decides whether this host already runs a complete kubeadm control plane.
+#
+# admin.conf alone proves nothing: `kubeadm init` writes it before the control
+# plane is up. A cluster counts as ready only when the API server answers and
+# the objects of the last init phases exist: ConfigMap kube-system/kubeadm-config
+# (phase upload-config) and Deployment kube-system/coredns (phase addon/coredns,
+# the last one, since addon/kube-proxy is skipped).
+- name: Look for an admin kubeconfig from a previous kubeadm init
+  ansible.builtin.stat:
+    path: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_admin_conf
+
+- name: Look for control plane static pod manifests
+  ansible.builtin.find:
+    paths: "{{ kubeadm_init_manifests_dir }}"
+    patterns: "*.yaml"
+  register: kubeadm_init_manifests
+
+- name: Look for etcd data
+  ansible.builtin.stat:
+    path: "{{ kubeadm_init_etcd_dir }}/member"
+  register: kubeadm_init_etcd_member
+
+- name: Collect traces of a previous kubeadm init
+  ansible.builtin.set_fact:
+    kubeadm_init_traces: >-
+      {{ ([kubeadm_init_admin_kubeconfig] if kubeadm_init_admin_conf.stat.exists else [])
+         + (kubeadm_init_manifests.files | map(attribute='path') | list)
+         + ([kubeadm_init_etcd_dir] if kubeadm_init_etcd_member.stat.exists else []) }}
+
+# The API server address of an existing cluster (kubeadm writes the
+# advertise address into admin.conf).
+- name: Read the admin kubeconfig of the existing cluster
+  ansible.builtin.slurp:
+    src: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_admin_conf_content
+  when: kubeadm_init_admin_conf.stat.exists
+
+- name: Remember the address of the existing cluster
+  ansible.builtin.set_fact:
+    kubeadm_init_existing_ip: >-
+      {{ (kubeadm_init_admin_conf_content.content | b64decode | from_yaml).clusters[0].cluster.server
+         | urlsplit('hostname') }}
+  when: kubeadm_init_admin_conf.stat.exists
+
+# Typical after a reboot on DHCP: the host got a new address, the control
+# plane cannot bind to the old one and the API server stays down.
+- name: Check that the address of the existing cluster is still assigned to this host
+  ansible.builtin.assert:
+    that:
+      - kubeadm_init_existing_ip in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      The cluster on this host was created with API server address {{ kubeadm_init_existing_ip }},
+      which is no longer assigned to any interface (local IPv4 addresses:
+      {{ ansible_facts['all_ipv4_addresses'] | join(', ') }}). The control plane cannot start without
+      it, and a kubeadm cluster cannot change its address. Give the host its old address back (static
+      IP or DHCP reservation) and deploy again, or recreate the cluster on the new address:
+      `make destroy FORCE=1`, then deploy again.
+    quiet: true
+  when: kubeadm_init_admin_conf.stat.exists
+
+- name: Wait for the API server of the existing control plane
+  ansible.builtin.command:
+    cmd: kubectl get --raw /readyz
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_existing_readyz
+  until: kubeadm_init_existing_readyz.rc == 0
+  retries: "{{ kubeadm_init_api_wait_retries }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+  when: kubeadm_init_admin_conf.stat.exists and kubeadm_init_manifests.matched > 0
+
+- name: Check that kubeadm init has completed
+  ansible.builtin.command:
+    cmd: kubectl --namespace kube-system get configmap/kubeadm-config deployment/coredns --output name
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_completed
+  changed_when: false
+  failed_when: false
+  when: kubeadm_init_existing_readyz.rc | default(1) == 0
+
+- name: Evaluate the control plane state
+  ansible.builtin.set_fact:
+    kubeadm_init_cluster_ready: "{{ kubeadm_init_completed.rc | default(1) == 0 }}"
+
+- name: Refuse to continue on a half-initialised control plane
+  ansible.builtin.fail:
+    msg: >-
+      This host has traces of a previous kubeadm init ({{ kubeadm_init_traces | join(', ') }}),
+      but no working cluster: {{ kubeadm_init_broken_reason }}.
+      This usually means kubeadm init was interrupted or failed. It is not repaired automatically
+      because that would wipe data. Run `make destroy FORCE=1` (kubeadm reset and cleanup), then
+      deploy again.
+  vars:
+    kubeadm_init_broken_reason: >-
+      {{ 'the API server does not answer' if kubeadm_init_existing_readyz.rc | default(1) != 0
+         else 'kube-system/kubeadm-config or kube-system/coredns is missing' }}
+  when: kubeadm_init_traces | length > 0 and not kubeadm_init_cluster_ready

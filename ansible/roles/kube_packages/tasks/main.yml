@@ -1,17 +1,73 @@
 ---
-- name: Create apt keyrings directory
+- name: Create apt keyrings and download cache directories
   ansible.builtin.file:
-    path: /etc/apt/keyrings
+    path: "{{ item }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
+  loop:
+    - /etc/apt/keyrings
+    - "{{ download_cache_dir }}"
 
-# The armored key is used as is (apt accepts .asc keyrings), no gpg needed.
+# Always fetched (the upstream key gets its expiry extended in place), but
+# reported as changed only when the content differs.
 - name: Download Kubernetes apt repository key
   ansible.builtin.get_url:
     url: "{{ kube_packages_repo_url }}Release.key"
+    dest: "{{ kube_packages_key_download }}"
+    force: true
+    owner: root
+    group: root
+    mode: "0644"
+
+# The file must hold exactly one primary key, the pinned one; otherwise apt
+# would also trust any extra key smuggled into it.
+- name: Read fingerprints of the downloaded key
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      gpg_home="$(mktemp -d)"
+      trap 'rm -rf "${gpg_home}"' EXIT
+      gpg --homedir "${gpg_home}" --batch --with-colons --show-keys {{ kube_packages_key_download | quote }} \
+        | awk -F: '$1 == "pub" { primary = 1; next } $1 == "fpr" && primary { print $10; primary = 0 }'
+    executable: /bin/bash
+  register: kube_packages_key_fingerprints
+  changed_when: false
+
+- name: Check the fingerprint of the Kubernetes apt repository key
+  ansible.builtin.assert:
+    that:
+      - kube_packages_key_fingerprints.stdout_lines == [k8s_apt_key_fingerprint]
+    fail_msg: >-
+      {{ kube_packages_repo_url }}Release.key contains key(s)
+      [{{ kube_packages_key_fingerprints.stdout_lines | join(', ') }}], expected exactly
+      {{ k8s_apt_key_fingerprint }} (K8S_APT_KEY_FINGERPRINT in versions.env). The key is not
+      trusted. If the Kubernetes project has rotated its signing key, verify the new fingerprint
+      and update versions.env.
+    quiet: true
+
+# The armored key is used as is (apt accepts .asc keyrings), no dearmor needed.
+- name: Trust the verified Kubernetes apt repository key
+  ansible.builtin.copy:
+    src: "{{ kube_packages_key_download }}"
     dest: "{{ kube_packages_keyring }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+# Must be in place before the first install: without it apt picks newer
+# kubeadm/kubelet/kubectl from any other repository and refuses the pinned
+# versions as downgrades.
+- name: Pin Kubernetes packages to pkgs.k8s.io
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/kubernetes
+    content: |
+      # Managed by Ansible (role kube_packages).
+      Package: {{ kube_packages_pinned | join(' ') }}
+      Pin: origin pkgs.k8s.io
+      Pin-Priority: {{ kube_packages_pin_priority }}
     owner: root
     group: root
     mode: "0644"

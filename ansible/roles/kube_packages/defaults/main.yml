@@ -1,8 +1,19 @@
 ---
 kube_packages_repo_url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/deb/"
 kube_packages_keyring: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+# Downloaded key waits here until its fingerprint is checked.
+kube_packages_key_download: "{{ download_cache_dir }}/kubernetes-{{ k8s_minor }}-Release.key"
 kube_packages_names:
   - kubeadm
   - kubelet
   - kubectl
+# Packages that must come from pkgs.k8s.io only, even if another configured
+# repository (e.g. packages.microsoft.com on GitHub runners) ships newer ones.
+kube_packages_pinned:
+  - kubeadm
+  - kubelet
+  - kubectl
+  - kubernetes-cni
+  - cri-tools
+kube_packages_pin_priority: 1001
 kube_packages_apt_lock_timeout: 600

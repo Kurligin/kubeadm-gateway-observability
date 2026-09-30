@@ -5,7 +5,7 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
   advertiseAddress: {{ kubeadm_init_node_ip }}
-  bindPort: 6443
+  bindPort: {{ k8s_api_server_port }}
 nodeRegistration:
   name: {{ kubeadm_init_node_name }}
   criSocket: {{ kubeadm_init_cri_socket }}
@@ -29,22 +29,18 @@ kubernetesVersion: v{{ k8s_version }}
 networking:
   podSubnet: {{ k8s_pod_subnet }}
   serviceSubnet: {{ k8s_service_subnet }}
-# Metrics endpoints of the control plane listen on all interfaces so that
-# Prometheus can scrape them (they still require authentication, except the
-# etcd metrics port, which serves metrics only).
+# controller-manager and scheduler serve metrics (HTTPS, authenticated and
+# authorised by the API server) on the node address, so that Prometheus can
+# reach them; kubeadm points their liveness probes to the same address.
+# etcd keeps the kubeadm default: plain-HTTP metrics on 127.0.0.1:2381 only.
 controllerManager:
   extraArgs:
     - name: bind-address
-      value: 0.0.0.0
+      value: {{ kubeadm_init_node_ip }}
 scheduler:
   extraArgs:
     - name: bind-address
-      value: 0.0.0.0
-etcd:
-  local:
-    extraArgs:
-      - name: listen-metrics-urls
-        value: http://0.0.0.0:2381
+      value: {{ kubeadm_init_node_ip }}
 ---
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration

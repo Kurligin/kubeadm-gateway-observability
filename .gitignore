@@ -10,3 +10,6 @@ ansible/collections/
 
 # CA certificate exported by `make ca`
 ca.crt
+
+# Local inventory with real hosts and keys
+ansible/inventory/remote.yml

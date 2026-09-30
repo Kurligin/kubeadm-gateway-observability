@@ -16,6 +16,10 @@ node_prep_sysctl:
   net.ipv4.ip_forward: "1"
   net.bridge.bridge-nf-call-iptables: "1"
   net.bridge.bridge-nf-call-ip6tables: "1"
+# systemd-sysctl applies sysctl.d files sorted by file name and the last
+# assignment wins. "zz-" sorts after every "NN-" file, including
+# 99-sysctl.conf (-> /etc/sysctl.conf) and Cilium's 99-zzz-override_cilium.conf.
+node_prep_sysctl_file: /etc/sysctl.d/zz-kubernetes.conf
 
 # How long apt waits for a lock held by unattended-upgrades / cloud-init.
 node_prep_apt_lock_timeout: 600

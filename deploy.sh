@@ -6,6 +6,9 @@
 #
 # Extra environment variables (NODE_IP, INVENTORY, ...) are passed to make.
 # Safe to run repeatedly: every step checks the current state first.
+# Works both as a regular user with sudo and as root (`sudo ./deploy.sh`);
+# the Python environment in .venv always belongs to the owner of the
+# repository, so both ways can be mixed.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +18,7 @@ readonly REQUIREMENTS="${REPO_DIR}/requirements.txt"
 readonly COLLECTIONS_FILE="${REPO_DIR}/ansible/requirements.yml"
 readonly COLLECTIONS_DIR="${REPO_DIR}/ansible/collections"
 readonly SYSTEM_PACKAGES=(python3 python3-venv make)
+readonly CLOUD_INIT_TIMEOUT=900
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -42,11 +46,28 @@ check_os() {
   [[ $(uname -m) == "x86_64" ]] || die "only x86_64 (amd64) is supported, found $(uname -m)"
 }
 
+# Runs a command as the owner of the repository: when invoked as root via
+# sudo, files in .venv and ansible/collections must not become root-owned.
+as_repo_owner() {
+  local owner
+  owner="$(stat -c %U "${REPO_DIR}")"
+  if [[ ${EUID} -eq 0 && ${owner} != "root" ]]; then
+    sudo -H -u "${owner}" -- "$@"
+  else
+    "$@"
+  fi
+}
+
 wait_for_cloud_init() {
   # On freshly created cloud VMs apt is busy until cloud-init finishes.
-  if command -v cloud-init >/dev/null 2>&1; then
-    log "Waiting for cloud-init to finish"
-    cloud-init status --wait >/dev/null 2>&1 || true
+  command -v cloud-init >/dev/null 2>&1 || return 0
+  log "Waiting for cloud-init to finish (up to $((CLOUD_INIT_TIMEOUT / 60)) min)"
+  local rc=0
+  timeout "${CLOUD_INIT_TIMEOUT}" cloud-init status --wait >/dev/null 2>&1 || rc=$?
+  # 1 and 2 mean cloud-init finished with errors, which is not our concern.
+  if [[ ${rc} -eq 124 ]]; then
+    warn "cloud-init is still running after $((CLOUD_INIT_TIMEOUT / 60)) min" \
+      "(see 'cloud-init status --long'); continuing, apt waits for its lock up to 10 min"
   fi
 }
 
@@ -71,7 +92,7 @@ install_system_packages() {
 prepare_venv() {
   if [[ ! -x ${VENV_DIR}/bin/python ]]; then
     log "Creating Python virtual environment in .venv"
-    python3 -m venv "${VENV_DIR}"
+    as_repo_owner python3 -m venv "${VENV_DIR}"
   fi
   # Reinstall only when requirements.txt changes.
   local stamp="${VENV_DIR}/.requirements.sha256"
@@ -79,8 +100,8 @@ prepare_venv() {
   wanted="$(sha256sum "${REQUIREMENTS}" | cut -d' ' -f1)"
   if [[ ! -f ${stamp} || $(<"${stamp}") != "${wanted}" ]]; then
     log "Installing pinned Python requirements"
-    "${VENV_DIR}/bin/pip" install --quiet --disable-pip-version-check -r "${REQUIREMENTS}"
-    printf '%s\n' "${wanted}" >"${stamp}"
+    as_repo_owner "${VENV_DIR}/bin/pip" install --quiet --disable-pip-version-check -r "${REQUIREMENTS}"
+    printf '%s\n' "${wanted}" | as_repo_owner tee "${stamp}" >/dev/null
   else
     log "Python requirements up to date ($("${VENV_DIR}/bin/ansible" --version | head -n1))"
   fi
@@ -93,16 +114,8 @@ install_collections() {
     return
   fi
   log "Installing pinned Ansible collections"
-  "${VENV_DIR}/bin/ansible-galaxy" collection install --upgrade \
+  as_repo_owner "${VENV_DIR}/bin/ansible-galaxy" collection install --upgrade \
     -r "${COLLECTIONS_FILE}" -p "${COLLECTIONS_DIR}" >/dev/null
-}
-
-check_sudo() {
-  [[ ${EUID} -eq 0 ]] && return
-  if ! sudo -n true 2>/dev/null; then
-    log "sudo requires a password; Ansible will ask for it (BECOME password)"
-    export ANSIBLE_BECOME_ASK_PASS=true
-  fi
 }
 
 main() {
@@ -111,7 +124,7 @@ main() {
     --bootstrap-only) bootstrap_only=true ;;
     "") ;;
     -h | --help)
-      sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       return
       ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -126,7 +139,7 @@ main() {
   if [[ ${bootstrap_only} == true ]]; then
     return
   fi
-  check_sudo
+  # `make cluster` asks for the sudo password itself if one is needed.
   log "Running make deploy"
   exec make deploy
 }

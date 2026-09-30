@@ -12,11 +12,13 @@ node_ip_override: "{{ lookup('ansible.builtin.env', 'NODE_IP') }}"
 
 # User that receives ~/.kube/config and the helm-diff plugin besides root:
 # the SSH login user for remote hosts, otherwise the user that invoked
-# `sudo`/`make` on this machine.
+# `sudo`/`make` on this machine. Falls back to root when none of them is
+# known (e.g. a minimal environment without USER), so only root gets them.
 kube_user: >-
   {{ ansible_user
      | default(lookup('ansible.builtin.env', 'SUDO_USER'), true)
-     | default(lookup('ansible.builtin.env', 'USER'), true) }}
+     | default(lookup('ansible.builtin.env', 'USER'), true)
+     | default('root', true) }}
 
 # Single-node cluster: allow workloads on the control plane and let Cilium
 # node IPAM use this node for LoadBalancer Services.

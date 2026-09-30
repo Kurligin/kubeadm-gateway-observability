@@ -80,6 +80,8 @@
     group: root
     mode: "0755"
 
+# A config.toml left by a packaged containerd (Docker) is kept as a
+# timestamped backup next to it before being replaced.
 - name: Render containerd configuration
   ansible.builtin.template:
     src: config.toml.j2
@@ -87,6 +89,7 @@
     owner: root
     group: root
     mode: "0644"
+    backup: true
   notify: Restart containerd
 
 - name: Install containerd systemd unit

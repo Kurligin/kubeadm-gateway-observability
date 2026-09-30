@@ -18,6 +18,7 @@ spec:
         type: LoadBalancer
         loadBalancerClass: {{ .Values.envoyProxy.loadBalancerClass }}
         externalTrafficPolicy: {{ .Values.envoyProxy.externalTrafficPolicy }}
+        allocateLoadBalancerNodePorts: {{ .Values.envoyProxy.allocateLoadBalancerNodePorts }}
   telemetry:
     # JSON access log to stdout, collected together with the pod logs.
     accessLog:

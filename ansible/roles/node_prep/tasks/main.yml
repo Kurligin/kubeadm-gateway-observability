@@ -48,7 +48,7 @@
 - name: Persist sysctl settings
   ansible.builtin.template:
     src: sysctl.conf.j2
-    dest: /etc/sysctl.d/99-kubernetes.conf
+    dest: "{{ node_prep_sysctl_file }}"
     owner: root
     group: root
     mode: "0644"
@@ -59,13 +59,67 @@
   register: node_prep_sysctl_current
   changed_when: false
 
-# Applied only when the running kernel differs from the desired state, so
-# the task is idempotent and also repairs values changed by someone else.
+# Only this file is loaded (not `sysctl --system`): procps applies
+# /etc/sysctl.conf last, so a conflicting value there would win again and the
+# task would report a change on every run. Applied only when the running
+# kernel differs from the desired state, which also repairs values changed
+# by someone else.
 - name: Apply sysctl settings
   ansible.builtin.command:
-    cmd: sysctl --system
+    cmd: "sysctl -p {{ node_prep_sysctl_file }}"
   when: node_prep_sysctl_current.stdout_lines != (node_prep_sysctl.values() | list)
   changed_when: true
+
+- name: Verify sysctl values in the running kernel
+  ansible.builtin.command:
+    cmd: "sysctl -n {{ node_prep_sysctl.keys() | join(' ') }}"
+  register: node_prep_sysctl_applied
+  changed_when: false
+  failed_when: node_prep_sysctl_applied.stdout_lines != (node_prep_sysctl.values() | list)
+
+# Replays the boot-time order of systemd-sysctl and prints, for every managed
+# key, the value that is applied last and the file it comes from.
+- name: Find the effective boot-time sysctl values
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      systemd-analyze cat-config sysctl.d | awk -v keys="{{ node_prep_sysctl.keys() | join(' ') }}" '
+        BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+        /^# \/[^ ]+\.conf$/ { file = substr($0, 3); next }
+        /^[[:space:]]*([#;]|$)/ { next }
+        {
+          line = $0
+          sub(/^[[:space:]]*-/, "", line)
+          eq = index(line, "=")
+          if (eq == 0) next
+          key = substr(line, 1, eq - 1)
+          val = substr(line, eq + 1)
+          gsub(/[[:space:]]/, "", key)
+          gsub(/\//, ".", key)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+          if (key in want) { last[key] = val; src[key] = file }
+        }
+        END { for (key in last) printf "%s\t%s\t%s\n", key, last[key], src[key] }'
+    executable: /bin/bash
+  register: node_prep_sysctl_boot
+  changed_when: false
+
+- name: Check that the sysctl settings survive a reboot
+  ansible.builtin.assert:
+    that:
+      - node_prep_sysctl_boot.stdout_lines
+        | select('search', '^' ~ (item.key | regex_escape) ~ '\t' ~ (item.value | regex_escape) ~ '\t')
+        | list | length == 1
+    fail_msg: >-
+      After a reboot {{ item.key }} would not be {{ item.value }}: the last file that sets it is
+      {{ node_prep_sysctl_boot.stdout_lines | select('search', '^' ~ (item.key | regex_escape) ~ '\t')
+      | first | default('(none)') | regex_replace('^[^\t]*\t([^\t]*)\t(.*)$', '\2 (value \1)') }}.
+      Remove the conflicting line from that file (or rename the file so that it sorts before
+      {{ node_prep_sysctl_file | basename }}) and run the deployment again.
+    quiet: true
+  loop: "{{ node_prep_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
 
 # kubelet refuses to start with swap enabled (failSwapOn defaults to true).
 # Swap is disabled both at runtime and permanently in /etc/fstab. Swap that

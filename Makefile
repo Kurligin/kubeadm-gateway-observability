@@ -10,11 +10,12 @@ MAKEFLAGS += --no-print-directory
 
 THIS_MAKEFILE := $(firstword $(MAKEFILE_LIST))
 
-# Pinned versions (K8S_VERSION, CILIUM_VERSION, ...).
+# Pinned versions and settings (K8S_VERSION, CILIUM_VERSION, ...).
 include versions.env
 
 VENV ?= .venv
-INVENTORY ?= ansible/inventory/local.yml
+LOCAL_INVENTORY := ansible/inventory/local.yml
+INVENTORY ?= $(LOCAL_INVENTORY)
 ANSIBLE_ARGS ?=
 HELMFILE_ARGS ?=
 
@@ -51,12 +52,23 @@ deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
 	@$(MAKE) cluster
 	@$(MAKE) platform
 
+# On this machine without passwordless sudo, Ansible asks for the sudo
+# password once (BECOME password) instead of failing.
 cluster: $(ANSIBLE_PLAYBOOK) ## Prepare the node and bootstrap kubeadm (Ansible only)
+	@if [[ $${EUID} -ne 0 && '$(INVENTORY)' == '$(LOCAL_INVENTORY)' && -z "$${ANSIBLE_BECOME_ASK_PASS:-}" ]] \
+		&& ! sudo -n true 2>/dev/null; then \
+		echo '==> sudo requires a password; Ansible will ask for it (BECOME password)'; \
+		export ANSIBLE_BECOME_ASK_PASS=true; \
+	fi; \
+	echo '$(ANSIBLE_PLAYBOOK) -i $(INVENTORY) ansible/site.yml $(ANSIBLE_ARGS)'; \
 	$(ANSIBLE_PLAYBOOK) -i $(INVENTORY) ansible/site.yml $(ANSIBLE_ARGS)
 
+# ensure-basic-auth.sh runs after every apply: helmfile hooks fire only for
+# changed releases, so this is what restores a deleted Secret.
 platform: ## Install or update cluster add-ons (helmfile only)
 	@command -v helmfile >/dev/null || { echo "helmfile not found: run 'make cluster' first" >&2; exit 1; }
 	$(HELMFILE) apply --suppress-secrets $(HELMFILE_ARGS)
+	./scripts/ensure-basic-auth.sh '$(GATEWAY_NAMESPACE)' '$(BASIC_AUTH_SECRET)' '$(BASIC_AUTH_USER)'
 
 status: ## Show nodes, pods, Helm releases, Gateway and certificates (preview)
 	@kubectl get nodes -o wide

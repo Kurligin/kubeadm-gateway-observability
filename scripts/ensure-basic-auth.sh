@@ -6,7 +6,8 @@
 # The password is random and exists only in the cluster (keys "username",
 # "password" for `make status`, ".htpasswd" for the SecurityPolicy). An
 # existing Secret is never touched, so re-deploys keep the same password.
-# Called by helmfile (presync hook of the "gateway" release).
+# Called by `make platform` after every helmfile apply and by helmfile
+# (presync hook of the "gateway" release) before the first install.
 set -euo pipefail
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -30,12 +31,24 @@ main() {
   hash="$(printf '%s' "${password}" | openssl dgst -binary -sha1 | openssl base64 -A)"
 
   log "Creating Secret ${namespace}/${secret} (user ${username}, random password)"
-  kubectl -n "${namespace}" create secret generic "${secret}" \
-    --from-literal=username="${username}" \
-    --from-literal=password="${password}" \
-    --from-literal=.htpasswd="${username}:{SHA}${hash}" >/dev/null
-  kubectl -n "${namespace}" label secret "${secret}" \
-    app.kubernetes.io/part-of=gateway app.kubernetes.io/managed-by=deploy >/dev/null
+  # The manifest goes through stdin, so the password never appears in the
+  # argument list of a process. `create` rather than `apply`: apply would
+  # also store the password in the last-applied-configuration annotation.
+  kubectl create -f - >/dev/null <<MANIFEST
+apiVersion: v1
+kind: Secret
+metadata:
+  name: "${secret}"
+  namespace: "${namespace}"
+  labels:
+    app.kubernetes.io/part-of: gateway
+    app.kubernetes.io/managed-by: deploy
+type: Opaque
+stringData:
+  username: "${username}"
+  password: "${password}"
+  .htpasswd: "${username}:{SHA}${hash}"
+MANIFEST
 }
 
 main "$@"

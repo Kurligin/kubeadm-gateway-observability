@@ -2,8 +2,10 @@
 # Run through `make platform` (helmfile apply: diff first, upgrade only what changed).
 #
 # Versions come from versions.env. The node address (Cilium k8sServiceHost)
-# comes from NODE_IP or, if unset, from the API server URL in the current
-# kubeconfig, which kubeadm sets to the advertise address.
+# always comes from the API server URL in the current kubeconfig, which
+# kubeadm sets to the advertise address: the cluster cannot change it. NODE_IP,
+# if set, must match it; without a kubeconfig (offline rendering) NODE_IP is
+# used as is.
 {{- $versions := dict }}
 {{- range $line := readFile "versions.env" | splitList "\n" }}
 {{-   $line = trim $line }}
@@ -12,10 +14,16 @@
 {{-     $_ := set $versions $kv._0 $kv._1 }}
 {{-   end }}
 {{- end }}
-{{- $nodeIP := env "NODE_IP" }}
+{{- $requestedIP := env "NODE_IP" }}
+{{- $server := exec "sh" (list "-c" "kubectl config view --minify --output 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null || true") | trim }}
+{{- $nodeIP := $server | trimPrefix "https://" | splitList ":" | first }}
 {{- if eq $nodeIP "" }}
-{{-   $server := exec "kubectl" (list "config" "view" "--minify" "--output" "jsonpath={.clusters[0].cluster.server}") }}
-{{-   $nodeIP = $server | trimPrefix "https://" | splitList ":" | first }}
+{{-   if eq $requestedIP "" }}
+{{-     fail "No kubeconfig with a cluster found and NODE_IP is not set: run `make cluster` first (or set NODE_IP to render offline)." }}
+{{-   end }}
+{{-   $nodeIP = $requestedIP }}
+{{- else if and (ne $requestedIP "") (ne $requestedIP $nodeIP) }}
+{{-   fail (printf "The cluster in the current kubeconfig was created with API server address %s, but NODE_IP=%s. A kubeadm cluster cannot change its address: drop NODE_IP, or recreate the cluster with `make destroy FORCE=1` and deploy again." $nodeIP $requestedIP) }}
 {{- end }}
 
 environments:
@@ -31,14 +39,13 @@ environments:
         domain: demo.local
         # Gateway "public" and its routes live in this namespace.
         gateway:
-          namespace: gateway
+          namespace: {{ $versions.GATEWAY_NAMESPACE | quote }}
           name: public
-        # htpasswd Secret (gateway namespace) for basic auth on UI routes.
-        # Generated on first deploy by scripts/ensure-basic-auth.sh, never
-        # stored in git.
+        # htpasswd Secret (gateway namespace) for basic auth on UI routes,
+        # see versions.env.
         basicAuth:
-          secretName: ui-basic-auth
-          username: admin
+          secretName: {{ $versions.BASIC_AUTH_SECRET | quote }}
+          username: {{ $versions.BASIC_AUTH_USER | quote }}
 
 ---
 helmDefaults:
@@ -105,13 +112,26 @@ releases:
     values:
       - values/pki.yaml.gotmpl
 
-  # Controller plus Gateway API and Envoy Gateway CRDs.
+  # Controller only; its bundled CRDs are disabled. The Gateway API
+  # (standard channel) and Envoy Gateway CRDs of the same version are applied
+  # by the presync hook instead: CRDs in a chart's crds/ directory are only
+  # created on the first install and never upgraded. The hook runs whenever
+  # this release is installed or changed, e.g. on an ENVOY_GATEWAY_VERSION bump.
   - name: envoy-gateway
     namespace: envoy-gateway-system
     chart: oci://docker.io/envoyproxy/gateway-helm
     version: {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
     needs:
-      - kube-system/cilium
+      - kube-system/namespaces
+    values:
+      - values/envoy-gateway.yaml
+    hooks:
+      - events: ["presync"]
+        showlogs: true
+        command: ./scripts/apply-gateway-crds.sh
+        args:
+          - {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
+          - values/envoy-gateway-crds.yaml
 
   # Angie web-v1 / web-v2 behind the Gateway.
   - name: demo-app
@@ -135,8 +155,10 @@ releases:
     values:
       - values/gateway.yaml.gotmpl
     hooks:
-      # Runs only when the release is installed or changed; the script never
-      # replaces an existing Secret.
+      # Creates the Secret before the first install, so the policies that use
+      # it never see it missing. Hooks run only when the release changes;
+      # `make platform` calls the same (idempotent) script after every apply,
+      # which also restores a deleted Secret.
       - events: ["presync"]
         showlogs: true
         command: ./scripts/ensure-basic-auth.sh

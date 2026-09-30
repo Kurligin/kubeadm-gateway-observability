@@ -12,6 +12,9 @@ envoyProxy:
   # Cilium node IPAM: the LoadBalancer address is the node IP.
   loadBalancerClass: io.cilium/node
   externalTrafficPolicy: Cluster
+  # Cilium (kube-proxy replacement) serves the LoadBalancer address itself;
+  # no NodePorts are opened on the node.
+  allocateLoadBalancerNodePorts: false
   replicas: 1
   resources:
     requests:
@@ -52,13 +55,17 @@ app:
   trafficPolicy:
     requestTimeout: 10s
     connectTimeout: 2s
+    # Envoy retries regardless of the HTTP method, so only failures where the
+    # request provably never reached the application are retried: that is
+    # safe for non-idempotent methods (POST, PATCH) too. 5xx responses and
+    # resets after the request was sent are not retried.
     retry:
       numRetries: 2
       perRetryTimeout: 3s
       triggers:
-        - 5xx
         - connect-failure
-        - reset
+        - refused-stream
+        - reset-before-request
     # Flood guard per Envoy replica, far above normal and test traffic.
     rateLimit:
       requests: 500

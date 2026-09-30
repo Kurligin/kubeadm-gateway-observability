@@ -7,3 +7,7 @@ namespaces:
   # Gateway configuration only (routes, policies, certificate); no pods.
   - name: {{ .Values.gateway.namespace }}
     podSecurity: restricted
+  # Envoy Gateway controller, its certgen job and the Envoy proxies all run
+  # as non-root with dropped capabilities and seccomp RuntimeDefault.
+  - name: envoy-gateway-system
+    podSecurity: restricted
