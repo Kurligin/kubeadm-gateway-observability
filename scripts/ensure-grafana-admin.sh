@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Create the Secret with the Grafana admin credentials, once.
 #
-#   scripts/ensure-grafana-admin.sh <namespace> <secret> <username>
+#   scripts/ensure-grafana-admin.sh <namespace> <secret> <username> [deployment]
 #
 # The password is random and exists only in the cluster (keys "admin-user"
 # and "admin-password", read by Grafana through admin.existingSecret and by
-# `make status`). An existing Secret is never touched, so re-deploys keep the
-# same password and Grafana is not restarted.
+# `make ui`). An existing Secret is never touched, so re-deploys keep the
+# same password and Grafana is not restarted. If the Secret was missing
+# (deleted) while Grafana already runs, Grafana still has the old password
+# in its environment: the optional Grafana Deployment is then restarted, so
+# the new password is the one that works (and the one `make ui` shows).
 # Called by `make platform` after every helmfile apply and by helmfile
 # (presync hook of the "kube-prometheus-stack" release) before the first
 # install.
@@ -19,8 +22,8 @@ die() {
 }
 
 main() {
-  [[ $# -eq 3 ]] || die "usage: $0 <namespace> <secret> <username>"
-  local namespace=$1 secret=$2 username=$3
+  [[ $# -eq 3 || $# -eq 4 ]] || die "usage: $0 <namespace> <secret> <username> [deployment]"
+  local namespace=$1 secret=$2 username=$3 deployment=${4:-}
 
   if kubectl -n "${namespace}" get secret "${secret}" >/dev/null 2>&1; then
     log "Secret ${namespace}/${secret} already exists, keeping it"
@@ -48,6 +51,14 @@ stringData:
   admin-user: "${username}"
   admin-password: "${password}"
 MANIFEST
+
+  # Grafana reads the password from its environment at start-up (and keeps
+  # no state between restarts), so a restart applies the new one.
+  if [[ -n ${deployment} ]] && kubectl -n "${namespace}" get deployment "${deployment}" >/dev/null 2>&1; then
+    log "Restarting ${namespace}/${deployment} to apply the new admin password"
+    kubectl -n "${namespace}" rollout restart deployment "${deployment}" >/dev/null
+    kubectl -n "${namespace}" rollout status deployment "${deployment}" --timeout=300s
+  fi
 }
 
 main "$@"

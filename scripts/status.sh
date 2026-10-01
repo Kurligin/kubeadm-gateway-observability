@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Short overview of the deployment: node and versions, Gateway address, UI
+# links, Helm releases and a quick health summary. Passwords are not shown
+# here (`make ui`). Called by `make status`.
+set -euo pipefail
+
+readonly DOMAIN=${DOMAIN:-demo.local}
+readonly GATEWAY_NAMESPACE=gateway
+readonly GATEWAY_NAME=public
+readonly UI_HOSTS=(app grafana prometheus alertmanager logs)
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+section() {
+  if [[ -t 1 ]]; then
+    printf '\n\033[1m%s\033[0m\n' "$*"
+  else
+    printf '\n%s\n' "$*"
+  fi
+}
+
+main() {
+  command -v kubectl >/dev/null || die "kubectl not found: run 'make deploy' first"
+  command -v jq >/dev/null || die "jq not found"
+  kubectl get --raw /readyz >/dev/null 2>&1 || die "the API server does not answer (is the cluster deployed? 'make deploy')"
+
+  section "Node"
+  kubectl get nodes -o json | jq -r '.items[] |
+    "  \(.metadata.name)  \([.status.conditions[] | select(.type == "Ready")][0].status | if . == "True" then "Ready" else "NotReady" end)  " +
+    "\([.status.addresses[] | select(.type == "InternalIP")][0].address)  " +
+    "Kubernetes \(.status.nodeInfo.kubeletVersion), \(.status.nodeInfo.containerRuntimeVersion), \(.status.nodeInfo.osImage)"'
+
+  section "Gateway"
+  local gw ip programmed
+  gw="$(kubectl -n "${GATEWAY_NAMESPACE}" get gateway "${GATEWAY_NAME}" -o json 2>/dev/null || echo '{}')"
+  ip="$(jq -r '.status.addresses[0].value // empty' <<<"${gw}")"
+  programmed="$(jq -r '[.status.conditions[]? | select(.type == "Programmed")][0].status // "unknown"' <<<"${gw}")"
+  printf '  %s/%s  address %s  Programmed=%s\n' "${GATEWAY_NAMESPACE}" "${GATEWAY_NAME}" "${ip:-none}" "${programmed}"
+
+  section "Addresses (HTTPS, certificate of the demo CA)"
+  local host
+  for host in "${UI_HOSTS[@]}"; do
+    case ${host} in
+      app) printf '  %-13s https://%s.%s/\n' "application" "${host}" "${DOMAIN}" ;;
+      logs) printf '  %-13s https://%s.%s/select/vmui/\n' "logs (vmui)" "${host}" "${DOMAIN}" ;;
+      *) printf '  %-13s https://%s.%s/\n' "${host}" "${host}" "${DOMAIN}" ;;
+    esac
+  done
+  printf '\n  No DNS needed: add to /etc/hosts of your machine\n'
+  printf '    %s' "${ip:-<node IP>}"
+  for host in "${UI_HOSTS[@]}"; do printf ' %s.%s' "${host}" "${DOMAIN}"; done
+  printf '\n  or use curl --resolve app.%s:443:%s\n' "${DOMAIN}" "${ip:-<node IP>}"
+  printf '  CA certificate for curl --cacert / the browser: make ca (writes ca.crt)\n'
+  printf '  Passwords (Grafana, basic auth of Prometheus/Alertmanager/logs): make ui\n'
+
+  section "Helm releases"
+  if command -v helm >/dev/null; then
+    helm list --all-namespaces --all --output json | jq -r '
+      (map(select(.status == "deployed")) | length) as $ok |
+      "  \($ok)/\(length) deployed",
+      (.[] | select(.status != "deployed") | "  NOT deployed: \(.namespace)/\(.name) \(.status)")'
+    helm list --all-namespaces --output json | jq -r '.[] | "    \(.namespace)/\(.name)  \(.chart)  rev \(.revision)"'
+  else
+    printf '  helm not installed\n'
+  fi
+
+  section "Health"
+  kubectl get pods --all-namespaces -o json | jq -r '
+    [.items[] | select(.status.phase != "Succeeded")] as $pods |
+    [$pods[] | select(.status.phase == "Running" and
+        ([.status.containerStatuses[]? | select(.ready != true)] | length) == 0)] as $ready |
+    "  pods ready: \($ready | length)/\($pods | length)",
+    ($pods[] | select(.status.phase != "Running" or
+        ([.status.containerStatuses[]? | select(.ready != true)] | length) > 0) |
+      "  not ready: \(.metadata.namespace)/\(.metadata.name) (\(.status.phase))")'
+  kubectl get certificates --all-namespaces -o json | jq -r '
+    [.items[] | select([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length > 0)] as $ok |
+    "  certificates ready: \($ok | length)/\(.items | length)"'
+  printf '\n  Full end-to-end check: make verify\n'
+}
+
+main "$@"

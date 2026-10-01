@@ -3,15 +3,17 @@
 server:
   fullnameOverride: {{ .Values.logging.service | quote }}
   image:
+    # quay.io: the same image without Docker Hub's anonymous pull limit.
+    registry: quay.io
     tag: {{ printf "v%s" .Values.versions.VICTORIA_LOGS_VERSION | quote }}
-  # Seven days of logs, and never more than 4 GiB on disk (the oldest days
+  # Seven days of logs, and never more than 2 GiB on disk (the oldest days
   # are dropped first), so the node disk never fills up.
   retentionPeriod: 7d
-  retentionDiskSpaceUsage: 4
+  retentionDiskSpaceUsage: 2
   persistentVolume:
     enabled: true
     storageClassName: local-path
-    size: 5Gi
+    size: 3Gi
   resources:
     requests:
       cpu: 20m
@@ -37,8 +39,10 @@ server:
   serviceMonitor:
     enabled: {{ .Values.serviceMonitors }}
 
-# Upstream VictoriaLogs dashboard, picked up by the Grafana sidecar.
+# Upstream VictoriaLogs dashboard. Rendered into Grafana's namespace: the
+# Grafana sidecar reads ConfigMaps from there only.
 dashboards:
   enabled: true
+  namespace: {{ .Values.monitoring.namespace | quote }}
   labels:
     grafana_dashboard: "1"

@@ -1,0 +1,54 @@
+domain: {{ .Values.domain | quote }}
+
+gateway:
+  name: {{ .Values.gateway.name | quote }}
+
+basicAuth:
+  secretName: {{ .Values.basicAuth.secretName | quote }}
+
+# Observability UIs, https://<host>.<domain>. Grafana has its own login
+# (admin password in a Secret, see `make ui`); Prometheus, Alertmanager and
+# vmui have no authentication of their own, so the Gateway asks for basic
+# auth and forwards only what their UIs need: reads, queries and (for
+# Alertmanager) silences. Write and lifecycle endpoints (/-/reload,
+# /-/quit, VictoriaLogs /insert, ...) are never reachable from outside.
+routes:
+  - host: grafana
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    service: kube-prometheus-stack-grafana
+    port: 80
+    basicAuth: false
+  - host: prometheus
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    service: kube-prometheus-stack-prometheus
+    port: 9090
+    basicAuth: true
+    allow:
+      - method: GET
+      - method: HEAD
+      # Queries of the UI and the HTTP API (read-only endpoints).
+      - method: POST
+        pathPrefix: /api/v1
+  - host: alertmanager
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    service: kube-prometheus-stack-alertmanager
+    port: 9093
+    basicAuth: true
+    allow:
+      - method: GET
+      - method: HEAD
+      - method: POST
+        pathPrefix: /api/v2/silences
+      - method: DELETE
+        pathPrefix: /api/v2/silence
+  - host: logs
+    namespace: {{ .Values.logging.namespace | quote }}
+    service: {{ .Values.logging.service | quote }}
+    port: {{ .Values.logging.port }}
+    basicAuth: true
+    allow:
+      # vmui and the LogsQL query API live under /select/.
+      - method: GET
+        pathPrefix: /select
+      - method: POST
+        pathPrefix: /select

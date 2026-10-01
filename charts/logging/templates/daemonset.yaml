@@ -26,11 +26,11 @@ spec:
       tolerations:
         {{- toYaml .Values.tolerations | nindent 8 }}
       # Container log files are owned by root with mode 0640, so Fluentd runs
-      # as root. Everything else is locked down: no capabilities at all (root
-      # without CAP_DAC_OVERRIDE can only read files it owns, which is
-      # exactly the logs), no privilege escalation, read-only root filesystem,
-      # /var/log mounted read-only; the only writable host path is
-      # {{ .Values.hostStateDir }} (tail positions and buffer).
+      # as root (it reads them as their owner, no capability needed). The rest
+      # is locked down: all capabilities dropped (no CAP_DAC_OVERRIDE, so file
+      # permissions apply as usual), no privilege escalation, read-only root
+      # filesystem. Of the host it sees only the pod log directories
+      # (read-only) and {{ .Values.hostStateDir }} (tail positions and buffer).
       securityContext:
         runAsUser: 0
         runAsGroup: 0
@@ -78,8 +78,13 @@ spec:
             - name: config
               mountPath: /fluentd/etc/custom
               readOnly: true
-            - name: varlog
-              mountPath: /var/log
+            # Same paths as on the host: the symlinks in /var/log/containers
+            # point to absolute paths in /var/log/pods.
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: container-logs
+              mountPath: /var/log/containers
               readOnly: true
             - name: state
               mountPath: {{ .Values.hostStateDir }}
@@ -93,11 +98,16 @@ spec:
         - name: config
           configMap:
             name: fluentd
-        # /var/log/containers/*.log are symlinks into /var/log/pods.
-        - name: varlog
+        # Written by the kubelet: /var/log/pods/<ns>_<pod>_<uid>/<container>/N.log
+        # and the symlinks to them, /var/log/containers/*.log.
+        - name: pod-logs
           hostPath:
-            path: /var/log
-            type: Directory
+            path: /var/log/pods
+            type: DirectoryOrCreate
+        - name: container-logs
+          hostPath:
+            path: /var/log/containers
+            type: DirectoryOrCreate
         - name: state
           hostPath:
             path: {{ .Values.hostStateDir }}

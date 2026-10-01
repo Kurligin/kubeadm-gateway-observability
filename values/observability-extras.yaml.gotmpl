@@ -5,5 +5,10 @@ gateway:
   namespace: {{ .Values.gateway.namespace | quote }}
   name: {{ .Values.gateway.name | quote }}
 
+logging:
+  namespace: {{ .Values.logging.nodeNamespace | quote }}
+
 victoriaLogs:
   url: {{ printf "http://%s.%s.svc:%v" .Values.logging.service .Values.logging.namespace .Values.logging.port | quote }}
+  job: {{ .Values.logging.service | quote }}
+  namespace: {{ .Values.logging.namespace | quote }}

@@ -1,0 +1,26 @@
+---
+# Plain-HTTP (or token-less) metrics ports that host-network agents open on
+# every address of the node:
+#   9100  node-exporter (kube-rbac-proxy, needs a token anyway)
+#   8888  node-exporter kube-rbac-proxy /healthz
+#   9962  cilium-agent      9963  cilium-operator
+#   9964  cilium-envoy      9965  Hubble metrics
+# Only the node itself and pods (Prometheus) may connect; anything else gets
+# a TCP reset. Nothing else on the node is touched.
+node_firewall_metrics_ports:
+  - 9100
+  - 8888
+  - 9962
+  - 9963
+  - 9964
+  - 9965
+
+# Sources allowed besides the node's own addresses.
+node_firewall_allowed_cidrs:
+  - "{{ k8s_pod_subnet }}"
+
+# Own nftables table, loaded by an own oneshot unit: independent of the
+# distribution's nftables.service and of the rules of Cilium.
+node_firewall_table: kubeadm_gateway_metrics
+node_firewall_rules_file: /etc/kubeadm-gateway/metrics-firewall.nft
+node_firewall_service: kubeadm-gateway-metrics-firewall

@@ -76,16 +76,3 @@ app:
     rateLimit:
       requests: 10
       unit: Minute
-
-# htpasswd Secret in the release namespace (key ".htpasswd"), created by
-# scripts/ensure-basic-auth.sh. Used by UI routes with basicAuth: true.
-basicAuth:
-  secretName: ui-basic-auth
-
-# Extra HTTPS routes to cluster UIs, hostname = <host>.<domain>:
-#   - host: grafana
-#     namespace: monitoring
-#     service: kube-prometheus-stack-grafana
-#     port: 80
-#     basicAuth: false
-uiRoutes: []

@@ -16,14 +16,18 @@ gateway:
   namespace: gateway
   name: public
 
-# Namespace of the log collector (Fluentd).
+# Log collector (Fluentd): Prometheus job and namespace.
 logging:
   collectorJob: fluentd
+  namespace: logging-node
 
-# Grafana datasource for VictoriaLogs (plugin victoriametrics-logs-datasource).
+# VictoriaLogs: Grafana datasource (plugin victoriametrics-logs-datasource)
+# and its Prometheus job (FluentdNoOutput alert).
 victoriaLogs:
   # Required, e.g. http://victoria-logs.logging.svc:9428
   url: ""
+  job: victoria-logs
+  namespace: logging
 
 # Alert thresholds.
 alerts:

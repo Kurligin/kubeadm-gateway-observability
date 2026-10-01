@@ -31,18 +31,24 @@ export PATH := $(CURDIR)/$(VENV)/bin:$(PATH)
 
 SHELL_SCRIPTS := deploy.sh $(wildcard scripts/*.sh)
 # Own charts (the vendored local-path-provisioner chart is not linted).
-LOCAL_CHARTS := charts/namespaces charts/pki charts/gateway charts/demo-app \
-	charts/etcd-metrics-proxy charts/logging charts/observability-extras
+LOCAL_CHARTS := charts/namespaces charts/network-policies charts/pki \
+	charts/gateway charts/ui-routes charts/demo-app charts/etcd-metrics-proxy \
+	charts/logging charts/observability-extras
 # Required values of the charts above, for `helm lint` only.
 LINT_VALUES := --set image.tag=lint --set nodeIP=192.0.2.10 \
-	--set victoriaLogs.url=http://victoria-logs:9428
+	--set victoriaLogs.url=http://victoria-logs:9428 \
+	--set scraper.serviceAccount=prometheus --set scraper.namespace=monitoring
+
+# Grafana of kube-prometheus-stack: restarted by `make platform` only if its
+# admin password Secret had to be created anew.
+GRAFANA_DEPLOYMENT := kube-prometheus-stack-grafana
 
 # Root CA of the demo PKI (cert-manager), for `curl --cacert`.
 CA_FILE ?= ca.crt
 CA_NAMESPACE := cert-manager
 CA_SECRET := demo-ca-keypair
 
-.PHONY: help deploy cluster platform status ui ca destroy lint lint-deps versions
+.PHONY: help deploy cluster platform verify status ui ca destroy lint lint-deps versions
 
 help: ## Show this help
 	@printf 'Kubernetes %s (kubeadm) + Cilium %s + Envoy Gateway %s on Ubuntu 24.04\n\n' \
@@ -54,6 +60,7 @@ help: ## Show this help
 	@printf '  NODE_IP=<ip>      API server / Gateway address (default: IP of the default route)\n'
 	@printf '  INVENTORY=<file>  Ansible inventory (default: %s)\n' '$(INVENTORY)'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
+	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
 	@printf '  FORCE=1           confirm `make destroy`\n'
 
 deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
@@ -72,39 +79,53 @@ cluster: $(ANSIBLE_PLAYBOOK) ## Prepare the node and bootstrap kubeadm (Ansible 
 	$(ANSIBLE_PLAYBOOK) -i $(INVENTORY) ansible/site.yml $(ANSIBLE_ARGS)
 
 # ensure-*.sh run after every apply: helmfile hooks fire only for changed
-# releases, so this is what restores a deleted Secret.
+# releases, so this is what restores a deleted Secret (and restarts Grafana
+# if its admin password had to be generated anew).
+# --skip-diff-on-install: a first install prints no diff (it would be the
+# whole cluster, ~100k lines); upgrades still show what changes.
+# A short network hiccup (chart repository, OCI registry, image CDN) must not
+# fail the whole deployment, so both steps are retried. Chart repositories
+# are fetched first; apply then skips that step. A retry runs `sync` rather
+# than `apply`: apply skips a release whose diff is empty, and that is also
+# the case for a release left "failed" by the previous attempt.
 platform: ## Install or update cluster add-ons (helmfile only)
 	@command -v helmfile >/dev/null || { echo "helmfile not found: run 'make cluster' first" >&2; exit 1; }
-	$(HELMFILE) apply --concurrency $(HELMFILE_CONCURRENCY) --suppress-secrets $(HELMFILE_ARGS)
+	@for attempt in 1 2 3 4 5; do \
+		$(HELMFILE) repos && break; \
+		[[ $$attempt -lt 5 ]] || exit 1; \
+		echo "==> chart repositories not reachable, retrying in 15 s ($$attempt/5)" >&2; sleep 15; \
+	done
+	@args='--skip-deps --concurrency $(HELMFILE_CONCURRENCY) --suppress-secrets'; \
+	echo "$(HELMFILE) apply $$args --skip-diff-on-install $(HELMFILE_ARGS)"; \
+	$(HELMFILE) apply $$args --skip-diff-on-install $(HELMFILE_ARGS) && exit 0; \
+	for attempt in 2 3; do \
+		echo "==> helmfile failed; retrying in 30 s with helmfile sync (attempt $$attempt/3)" >&2; sleep 30; \
+		$(HELMFILE) sync $$args $(HELMFILE_ARGS) && exit 0; \
+	done; \
+	exit 1
 	./scripts/ensure-basic-auth.sh '$(GATEWAY_NAMESPACE)' '$(BASIC_AUTH_SECRET)' '$(BASIC_AUTH_USER)'
-	./scripts/ensure-grafana-admin.sh '$(MONITORING_NAMESPACE)' '$(GRAFANA_ADMIN_SECRET)' '$(GRAFANA_ADMIN_USER)'
+	./scripts/ensure-grafana-admin.sh '$(MONITORING_NAMESPACE)' '$(GRAFANA_ADMIN_SECRET)' '$(GRAFANA_ADMIN_USER)' '$(GRAFANA_DEPLOYMENT)'
 
-status: ## Show nodes, pods, Helm releases, Gateway, certificates, UI links and passwords
-	@kubectl get nodes -o wide
-	@echo
-	@kubectl get pods --all-namespaces
-	@echo
-	@helm list --all-namespaces
-	@echo
-	@kubectl get gateway,httproute --all-namespaces
-	@echo
-	@kubectl get certificate --all-namespaces
-	@echo
-	@$(MAKE) ui
+verify: ## End-to-end check: table of ✓/✗, non-zero exit code on failure
+	@./scripts/verify.sh
+
+status: ## Short overview: node, versions, Gateway address, UI links, releases, health
+	@./scripts/status.sh
 
 # Passwords are read from the cluster on request only; deploy never prints them.
 ui: ## Show observability UI addresses and their credentials
 	@ip="$$(kubectl -n $(GATEWAY_NAMESPACE) get gateway public -o jsonpath='{.status.addresses[0].value}')"; \
 	secret() { kubectl -n "$$1" get secret "$$2" -o jsonpath="{.data.$$3}" | base64 -d; }; \
-	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local logs.demo.local"\n' "$$ip"; \
+	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local"\n' "$$ip"; \
 	printf 'to /etc/hosts, or use curl --resolve; the certificate is issued by the demo CA, see `make ca`):\n\n'; \
-	printf '  Grafana     https://grafana.demo.local     user %s, password %s\n' \
+	printf '  Grafana       https://grafana.demo.local       user %s, password %s\n' \
 		"$$(secret $(MONITORING_NAMESPACE) $(GRAFANA_ADMIN_SECRET) admin-user)" \
 		"$$(secret $(MONITORING_NAMESPACE) $(GRAFANA_ADMIN_SECRET) admin-password)"; \
 	ba_user="$$(secret $(GATEWAY_NAMESPACE) $(BASIC_AUTH_SECRET) username)"; \
 	ba_pass="$$(secret $(GATEWAY_NAMESPACE) $(BASIC_AUTH_SECRET) password)"; \
-	printf '  Prometheus  https://prometheus.demo.local  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
-	printf '  Logs (vmui) https://logs.demo.local/select/vmui/  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"
+	printf '  Prometheus    https://prometheus.demo.local    basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
+	printf '  Alertmanager  https://alertmanager.demo.local  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
+	printf '  Logs (vmui)   https://logs.demo.local/select/vmui/  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"
 
 ca: ## Export the demo root CA certificate to $(CA_FILE) (for curl --cacert)
 	@kubectl -n $(CA_NAMESPACE) get secret $(CA_SECRET) -o jsonpath='{.data.ca\.crt}' | base64 -d >'$(CA_FILE).tmp'

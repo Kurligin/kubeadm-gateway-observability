@@ -5,7 +5,17 @@ podSecurityVersion: {{ .Values.versions.K8S_MINOR | quote }}
 # that need the host (host network/PID, hostPath) are kept in separate
 # "-node" namespaces, so the rest of monitoring and logging stays
 # "restricted".
+# kube-system is left as kubeadm creates it (static control-plane pods,
+# Cilium agents with host access).
 namespaces:
+  # cert-manager controller, webhook, cainjector and the start-up API check
+  # job: non-root, no capabilities, seccomp RuntimeDefault.
+  - name: cert-manager
+    podSecurity: restricted
+  # local-path-provisioner creates the volume directories on the node with
+  # short-lived helper pods that mount a hostPath, which "baseline" forbids.
+  - name: local-path-storage
+    podSecurity: privileged
   - name: demo
     podSecurity: restricted
   # Gateway configuration only (routes, policies, certificate); no pods.

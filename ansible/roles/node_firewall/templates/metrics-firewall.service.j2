@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Restrict host metrics ports to this node and the pod network
+Documentation=file://{{ node_firewall_rules_file }}
+After=nftables.service
+Before=kubelet.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/sbin/nft -f {{ node_firewall_rules_file }}
+ExecStop=/usr/sbin/nft delete table inet {{ node_firewall_table }}
+
+[Install]
+WantedBy=multi-user.target

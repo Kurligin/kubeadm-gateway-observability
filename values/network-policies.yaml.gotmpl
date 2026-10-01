@@ -1,0 +1,109 @@
+# Pods let in by the rules below.
+peers:
+  prometheus:
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    labels:
+      app.kubernetes.io/name: prometheus
+  grafana:
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    labels:
+      app.kubernetes.io/name: grafana
+  # Envoy proxies of the Gateway (UI routes).
+  envoy:
+    namespace: envoy-gateway-system
+    labels:
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/managed-by: envoy-gateway
+  fluentd:
+    namespace: {{ .Values.logging.nodeNamespace | quote }}
+    labels:
+      app.kubernetes.io/name: fluentd
+
+# Default-deny ingress in every namespace below, then only what is needed.
+# "demo" has its own policies in the demo-app chart.
+namespaces:
+  # Routes and policies only, no pods.
+  - name: {{ .Values.gateway.namespace | quote }}
+    allow: []
+
+  - name: envoy-gateway-system
+    allow:
+      # The Gateway itself: HTTP/HTTPS listeners of the Envoy proxies
+      # (Service ports 80/443), from anywhere.
+      - name: envoy-listeners
+        pods:
+          app.kubernetes.io/component: proxy
+          app.kubernetes.io/managed-by: envoy-gateway
+        from: [anywhere]
+        ports: [10080, 10443]
+      # Proxies <-> controller (xDS) and anything else inside the namespace.
+      - name: same-namespace
+        from: [same-namespace]
+      # Admission webhook of the controller, called by the API server.
+      - name: controller-webhook
+        pods:
+          control-plane: envoy-gateway
+        from: [anywhere]
+        ports: [9443]
+      - name: prometheus
+        from: [prometheus]
+        ports: [19001]
+
+  - name: cert-manager
+    allow:
+      # Admission webhook, called by the API server (TLS).
+      - name: webhook
+        pods:
+          app.kubernetes.io/component: webhook
+        from: [anywhere]
+        ports: [10250]
+      - name: prometheus
+        from: [prometheus]
+        ports: [9402]
+
+  - name: local-path-storage
+    allow: []
+
+  - name: {{ .Values.monitoring.namespace | quote }}
+    allow:
+      # Prometheus scrapes everything in its own namespace (itself, the
+      # config reloaders, Alertmanager, Grafana, operator,
+      # kube-state-metrics) and sends alerts to Alertmanager.
+      - name: prometheus
+        from: [prometheus]
+      - name: prometheus-ui
+        pods:
+          app.kubernetes.io/name: prometheus
+        from: [grafana, envoy]
+        ports: [9090]
+      - name: alertmanager-ui
+        pods:
+          app.kubernetes.io/name: alertmanager
+        from: [grafana, envoy]
+        ports: [9093]
+      - name: grafana-ui
+        pods:
+          app.kubernetes.io/name: grafana
+        from: [envoy]
+        ports: [3000]
+
+  # Host-network agents only (node-exporter, etcd metrics proxy): network
+  # policies do not apply to them; the policy covers any pod added later.
+  - name: {{ .Values.monitoring.nodeNamespace | quote }}
+    allow: []
+
+  # VictoriaLogs: logs in from Fluentd; queries from Grafana and vmui
+  # (Gateway); metrics for Prometheus. Nothing else may write logs.
+  - name: {{ .Values.logging.namespace | quote }}
+    allow:
+      - name: victoria-logs
+        pods:
+          app.kubernetes.io/name: victoria-logs-single
+        from: [fluentd, grafana, envoy, prometheus]
+        ports: [{{ .Values.logging.port }}]
+
+  - name: {{ .Values.logging.nodeNamespace | quote }}
+    allow:
+      - name: prometheus
+        from: [prometheus]
+        ports: [24231]

@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: ui-routes
+description: HTTPS routes to the observability UIs (Grafana, Prometheus, Alertmanager, vmui) on the shared Gateway
+type: application
+version: 0.1.0

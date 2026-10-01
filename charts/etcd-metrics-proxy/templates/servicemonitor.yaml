@@ -28,9 +28,8 @@ spec:
           secret:
             name: {{ include "etcd-metrics-proxy.tlsSecret" . }}
             key: ca.crt
-      authorization:
-        type: Bearer
-        credentials:
-          name: {{ include "etcd-metrics-proxy.scraper" . }}-token
-          key: token
+      # Prometheus' own ServiceAccount token: projected, short-lived and
+      # rotated by the kubelet (ServiceMonitors can reference only a token
+      # Secret or a file; a Secret would be a long-lived legacy token).
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
 {{- end }}

@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: network-policies
+description: Default-deny ingress and explicit allow rules for the platform namespaces
+type: application
+version: 0.1.0

@@ -1,9 +1,9 @@
 # kubeadm + Gateway API + observability
 
-> Черновик. Реализованы узел, кластер kubeadm, CNI, хранилище, TLS,
-> Gateway API, демо-приложение, мониторинг (Prometheus, Grafana, алерты) и
-> логи (Fluentd → VictoriaLogs). `make verify` и полный README — следующими
-> этапами.
+> Черновик README. Реализованы узел, кластер kubeadm, CNI, хранилище, TLS,
+> Gateway API, демо-приложение, мониторинг (Prometheus, Grafana, алерты),
+> логи (Fluentd → VictoriaLogs), политики безопасности и сквозная проверка
+> `make verify`. Итоговая документация — следующим этапом.
 
 Одна команда на чистой Ubuntu 24.04 поднимает одноузловой кластер Kubernetes
 (kubeadm) без kube-proxy: сеть — Cilium, StorageClass по умолчанию —
@@ -11,7 +11,8 @@ local-path-provisioner, вход — Envoy Gateway (Gateway API) с TLS от
 cert-manager, за ним демо-приложение на Angie в двух версиях (canary).
 Метрики собирает Prometheus (kube-prometheus-stack), логи контейнеров —
 Fluentd (не Fluent Bit) в VictoriaLogs; смотреть — Grafana, Prometheus UI и
-vmui через тот же Gateway. Повторный запуск ничего не меняет.
+vmui через тот же Gateway. Повторный запуск ничего не меняет, `make verify`
+одной командой проверяет всё это сквозными запросами.
 
 ## Что уже есть
 
@@ -22,12 +23,15 @@ vmui через тот же Gateway. Повторный запуск ничег�
 | Kubernetes | Ansible, роли `kube_packages`, `kubeadm_init` | kubeadm/kubelet/kubectl из pkgs.k8s.io (проверка отпечатка ключа, apt pinning, hold), `kubeadm init` без kube-proxy, kubeconfig |
 | Инструменты | Ansible, роль `helm_tools` | helm, helmfile, плагин helm-diff |
 | Платформа | helmfile | Cilium (kube-proxy replacement, node IPAM, Hubble), local-path-provisioner |
-| Namespaces | чарт `charts/namespaces` | namespaces с Pod Security Admission (enforce): `restricted` везде, кроме `monitoring-node` и `logging-node` (DaemonSet-ы, которым нужен доступ к узлу, см. «Особенности») |
+| Namespaces | чарт `charts/namespaces` | namespaces с Pod Security Admission (enforce): `restricted` везде, кроме `monitoring-node`, `logging-node` и `local-path-storage` (поды, которым нужен доступ к узлу, см. «Особенности») |
+| Сетевые политики | чарт `charts/network-policies` + NetworkPolicy в `charts/demo-app` | во всех наших namespaces входящий трафик запрещён по умолчанию, разрешено только нужное (см. «Особенности») |
+| Порты метрик на узле | Ansible, роль `node_firewall` | nftables: порты метрик Cilium и node-exporter доступны только с самого узла и из сети подов |
 | TLS | cert-manager + чарт `charts/pki` | self-signed корень → CA `demo-ca` (ClusterIssuer) → сертификат `demo.local`, `*.demo.local` |
 | Вход | Envoy Gateway (CRD Gateway API — канал standard) + чарт `charts/gateway` | Gateway `public` на IP узла: HTTP 80 → 301 на HTTPS 443; маршруты, canary, политики |
+| UI | чарт `charts/ui-routes` | маршруты к Grafana, Prometheus, Alertmanager и vmui на том же Gateway, basic auth, только нужные методы и пути |
 | Приложение | чарт `charts/demo-app` | Angie `web-v1` / `web-v2` по 2 реплики, JSON access-лог, метрики `/p8s` |
 | CRD мониторинга | чарт `prometheus-operator-crds` | ServiceMonitor, PodMonitor, PrometheusRule и др. — самым первым релизом |
-| Метрики | kube-prometheus-stack | Prometheus (3 дня, PVC), Alertmanager, Grafana, node-exporter, kube-state-metrics, правила и дашборды по кластеру |
+| Метрики | kube-prometheus-stack | Prometheus (3 дня, PVC), Alertmanager, Grafana, node-exporter (за kube-rbac-proxy), kube-state-metrics, правила и дашборды по кластеру |
 | Метрики etcd | чарт `charts/etcd-metrics-proxy` | kube-rbac-proxy: TLS + токен + RBAC перед `127.0.0.1:2381` etcd |
 | Логи | VictoriaLogs + чарт `charts/logging` (Fluentd) | Fluentd DaemonSet читает логи всех контейнеров, добавляет метаданные Kubernetes, шлёт в VictoriaLogs (7 дней, PVC) |
 | Алерты, дашборд | чарт `charts/observability-extras` | цели Envoy и Envoy Gateway, PrometheusRule, дашборд «Demo app — golden signals», datasource VictoriaLogs |
@@ -38,16 +42,32 @@ vmui через тот же Gateway. Повторный запуск ничег�
 
 ## Требования
 
-- Ubuntu 24.04 LTS, amd64; **рекомендуем 4 vCPU / 8 ГБ ОЗУ**, 20 ГБ диска
-  (на 40 ГБ после деплоя занято ~10 ГБ). Минимум — 2 vCPU / 4 ГБ: всё
-  поднимается, но свободной памяти остаётся ~0,6 ГБ, и под нагрузкой
-  (первый деплой) control plane может перезапуститься. Замеры через 5+ мин
-  после деплоя:
+- Ubuntu 24.04 LTS, amd64; **рекомендуем 4 vCPU / 8 ГБ ОЗУ и 30 ГБ
+  диска**. Минимум — 2 vCPU / 4 ГБ и 20 ГБ: всё поднимается, но запаса мало
+  (см. замеры ниже).
+- Память (замер через 5+ мин после деплоя):
 
   | ВМ | занято ОЗУ (`free`) | доступно | рабочий набор подов | крупнейшие |
   |---|---|---|---|---|
-  | 4 vCPU / 8 ГБ | 3,5 ГБ | 4,3 ГБ | 2,7 ГБ | kube-apiserver 0,86, Grafana 0,45, Prometheus 0,3 ГБ |
-  | 2 vCPU / 4 ГБ | 3,2 ГБ | 0,6 ГБ | 2,8 ГБ | то же |
+  | 4 vCPU / 8 ГБ | 3,4 ГБ | 4,6 ГБ | 2,7 ГБ | kube-apiserver 0,86, Grafana 0,45, Prometheus 0,3 ГБ |
+  | 2 vCPU / 4 ГБ | 3,2 ГБ | 0,65 ГБ | 2,8 ГБ | kube-apiserver 0,82, Prometheus 0,29, Grafana 0,21 ГБ (RSS) |
+
+  На 2 vCPU / 4 ГБ под нагрузкой (первый деплой) control plane может
+  перезапуститься — развёртывание это переживает.
+- Диск. Сразу после деплоя занято ~9,7 ГБ (Ubuntu 2,3 ГБ, образы
+  контейнеров 6 ГБ, остальное — etcd, kubelet, кэши). Дальше растут только
+  данные, и у каждого есть потолок:
+
+  | Что | Потолок |
+  |---|---|
+  | метрики Prometheus | 3 ГБ (`retentionSize`) + WAL ~0,5 ГБ |
+  | логи в VictoriaLogs | 2 ГБ (`retentionDiskSpaceUsage`) |
+  | буфер Fluentd | 256 МБ |
+  | логи контейнеров на узле | ротация kubelet (10 МБ × 5 файлов на контейнер, старые сжаты), на практике < 0,5 ГБ |
+
+  Итого пик ~16 ГБ. На диске 20 ГБ это ~80 %: чуть ниже порога, с
+  которого kubelet начинает удалять образы (85 %), поэтому 20 ГБ — минимум,
+  а с запасом — 30 ГБ.
 - постоянный IP узла (статический или резервирование DHCP): kubeadm вшивает
   адрес в кластер, и если после перезагрузки узел получит другой, control
   plane не поднимется (развёртывание это распознает и подскажет, что делать);
@@ -72,11 +92,15 @@ git clone <repo-url> && cd kubeadm-gateway-observability
 
 1. `make cluster` — Ansible (`ansible/site.yml`) готовит узел и поднимает кластер;
 2. `make platform` — `helmfile apply` ставит платформу и приложение в порядке
-   зависимостей (`needs`): CRD Prometheus Operator → Cilium →
-   local-path-provisioner, namespaces, cert-manager → pki, Envoy Gateway
-   (перед ним — его CRD) → kube-prometheus-stack, etcd-metrics-proxy,
-   VictoriaLogs → Fluentd, observability-extras, demo-app → gateway; после
-   этого проверяются Secret'ы с паролями (basic auth и admin Grafana).
+   зависимостей (`needs`): CRD Prometheus Operator → Cilium → namespaces →
+   сетевые политики, local-path-provisioner, cert-manager → pki, Envoy
+   Gateway (перед ним — его CRD); demo-app → gateway (приложение доступно,
+   даже если дальше что-то не встанет); observability-extras →
+   kube-prometheus-stack, etcd-metrics-proxy, VictoriaLogs → Fluentd; в
+   конце — ui-routes. После этого проверяются Secret'ы с паролями (basic
+   auth и admin Grafana). Репозитории чартов загружаются заранее, с
+   повторами при сбое сети; первая установка не печатает diff (десятки тысяч строк:
+   все манифесты платформы), повторные — печатают только изменения.
 
 IP узла определяется автоматически (интерфейс маршрута по умолчанию). Если
 интерфейсов несколько — задайте явно: `NODE_IP=10.0.0.5 ./deploy.sh`.
@@ -95,21 +119,78 @@ IP узла определяется автоматически (интерфе�
 | Команда | Что делает |
 |---|---|
 | `./deploy.sh` / `make deploy` | узел → кластер → платформа; идемпотентно |
+| `make verify` | сквозная проверка: таблица ✓/✗ с причинами, код возврата ≠ 0 при провале |
 | `make cluster` | только Ansible |
 | `make platform` | только helmfile |
-| `make status` | узлы, поды, релизы Helm, Gateway, сертификаты, адреса UI и пароли (предварительная версия) |
-| `make ui` | только адреса UI (Grafana, Prometheus, vmui) и пароли к ним |
+| `make status` | узел и версии, адрес Gateway, ссылки UI, релизы Helm, краткое здоровье (без паролей) |
+| `make ui` | адреса UI (Grafana, Prometheus, Alertmanager, vmui) и пароли к ним |
 | `make ca` | выгрузить корневой сертификат CA в `ca.crt` (для `curl --cacert`) |
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
 | `make lint-deps && make lint` | shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` |
 
 ## Проверка
 
+### Одной командой: `make verify`
+
+```bash
+make verify        # на узле: адрес, CA и пароль берутся из кластера
+```
+
+Скрипт `scripts/verify.sh` проходит те же 8 шагов, что описаны ниже для
+ручной проверки, и печатает строку на каждую проверку: `✓` — прошла, `✗` —
+нет (с причиной), `-` — пропущена (с причиной). В конце — итог и код
+возврата: `0`, если провалов нет, иначе `1`. Сразу после деплоя не всё
+готово мгновенно (цели Prometheus появляются через 1–2 интервала сбора),
+поэтому такие проверки повторяются до 5 минут (`WAIT=<секунды>`), а
+запись в логах ищется до 45 с.
+
+| Шаг | Что проверяется |
+|---|---|
+| 1 | узел `Ready`; все поды `Running` и готовы (перезапуски — не провал); все релизы Helm `deployed` |
+| 2 | Gateway `public`: `Programmed=True`, адрес = IP узла |
+| 3 | `http://` → 301 на `https://`; `https://app.demo.local/` → 200 и `Hello World!` (сертификат проверяется по CA кластера) |
+| 4 | 200 запросов: доля v2 в коридоре 5–20 % (вес 10 %); `/v2` и `X-Canary: true` → всегда v2 |
+| 5 | `/limited`: из 15 запросов не больше 10 успешных и хотя бы один 429 от rate limit Envoy (заголовок `x-ratelimit-limit: 10`); основной маршрут при этом отвечает 200 |
+| 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API) |
+| 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям) |
+| 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway не проходят (404); etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для локальной сети (проверяется только с другой машины) |
+
+Повторный запуск в течение минуты корректен: rate limit `/limited`
+считается поминутно, и если лимит ещё исчерпан прошлым запуском, все 15
+запросов получат 429 — это тоже работа лимита (успешных не больше 10),
+а 429 «не от лимита» (без заголовка `x-ratelimit-limit`) засчитывается как
+провал.
+
+**С другой машины** (без kubectl) — те же проверки, кроме уровня кластера
+(шаги 1–2 будут пропущены). Нужны `curl`, `jq`, CA и пароль basic auth с
+узла. Если на вашей машине есть kubectl, скрипт пользуется им, только когда
+текущий контекст смотрит в этот кластер (адрес API-сервера = `GATEWAY_IP`):
+
+```bash
+# на узле
+make ca && make ui           # ca.crt и пароль
+# на своей машине (ca.crt скопировать, например, scp)
+GATEWAY_IP=<IP узла> CA_FILE=ca.crt UI_PASSWORD=<пароль> ./scripts/verify.sh
+```
+
+### Руками, по шагам
+
+Те же проверки, что делает `make verify`. Шаги 3–8 можно выполнять и с
+другой машины (нужны `ca.crt` и пароль, см. выше).
+
+**1. Кластер.**
+
 ```bash
 kubectl get nodes -o wide          # Ready, v1.36.5
-kubectl get pods -n kube-system    # все Running
+kubectl get pods -A                # все Running и READY n/n (или Completed у Job)
+helm list -A                       # все STATUS deployed
 kubectl get storageclass           # local-path (default)
-curl -k https://<IP узла>:6443/healthz   # ok
+```
+
+**2. Gateway.**
+
+```bash
+kubectl -n gateway get gateway public   # PROGRAMMED True, ADDRESS = IP узла
 ```
 
 Повторный `./deploy.sh` должен завершиться с `changed=0` в итоге Ansible и
@@ -121,7 +202,7 @@ control plane, данные etcd, — а рабочего кластера не�
 остановится с подсказкой: автоматически такое состояние не чинится, нужен
 `make destroy FORCE=1` и повторный `./deploy.sh`.
 
-### Gateway и приложение
+### Gateway и приложение (шаги 3–6)
 
 DNS не нужен: `curl --resolve` подставляет IP узла для имени. Сертификат
 выпущен своим CA, поэтому curl нужен его корневой сертификат:
@@ -189,13 +270,21 @@ c -o /dev/null -w '%{http_code}\n' https://app.demo.local/broken   # 502
 
 ### Веб-интерфейсы мониторинга и логов
 
-Все три UI опубликованы через тот же Gateway (HTTPS, сертификат демо-CA):
+Все UI опубликованы через тот же Gateway (HTTPS, сертификат демо-CA),
+маршруты — в чарте `charts/ui-routes`:
 
-| UI | Адрес | Вход |
-|---|---|---|
-| Grafana | `https://grafana.demo.local` | своя форма входа: `admin` / пароль из Secret `monitoring/grafana-admin` |
-| Prometheus | `https://prometheus.demo.local` | basic auth Gateway: `admin` / пароль из Secret `gateway/ui-basic-auth` |
-| vmui (VictoriaLogs) | `https://logs.demo.local/select/vmui/` | тот же basic auth |
+| UI | Адрес | Вход | Что пропускает Gateway |
+|---|---|---|---|
+| Grafana | `https://grafana.demo.local` | своя форма входа: `admin` / пароль из Secret `monitoring/grafana-admin` | всё |
+| Prometheus | `https://prometheus.demo.local` | basic auth Gateway: `admin` / пароль из Secret `gateway/ui-basic-auth` | `GET`, `HEAD`, `POST /api/v1/*` (запросы) |
+| Alertmanager | `https://alertmanager.demo.local` | тот же basic auth | `GET`, `HEAD`, создание и удаление silence |
+| vmui (VictoriaLogs) | `https://logs.demo.local/select/vmui/` | тот же basic auth | только `/select/*` (vmui и LogsQL API) |
+
+У Prometheus, Alertmanager и VictoriaLogs своей аутентификации нет, поэтому
+наружу открыто только чтение: служебные `POST /-/reload`, `/-/quit` и
+приём логов `/insert/*` через Gateway недоступны даже с паролем (Envoy
+отвечает 404, запрос до сервиса не доходит). Внутри кластера к ним тоже
+нельзя обратиться из чужих namespaces — см. «Сетевые политики».
 
 Пароли случайные, создаются при первом деплое, в git и в вывод деплоя не
 попадают. Показать их по запросу — на узле:
@@ -208,14 +297,14 @@ kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | bas
 ```
 
 Чтобы открыть UI в браузере с другой машины, добавьте в её `/etc/hosts`
-строку `<IP узла> grafana.demo.local prometheus.demo.local logs.demo.local`
+строку `<IP узла> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local`
 и импортируйте `ca.crt` (или согласитесь с предупреждением браузера). Для
 curl хватает `--resolve`, как выше.
 
-### Мониторинг (Prometheus)
+### Мониторинг (Prometheus, шаг 7)
 
 kube-prometheus-stack ставит Prometheus Operator, Prometheus (интервал
-сбора 30 с, хранение 3 дня, но не больше 6 ГБ, PVC 8 ГиБ на local-path),
+сбора 30 с, хранение 3 дня, но не больше 3 ГБ, PVC 4 ГиБ на local-path),
 Alertmanager (1 реплика, без внешних получателей), Grafana, node-exporter и
 kube-state-metrics. Цели описаны ServiceMonitor/PodMonitor рядом с
 компонентами; Prometheus берёт их из всех namespaces.
@@ -228,10 +317,10 @@ kube-state-metrics. Цели описаны ServiceMonitor/PodMonitor рядом
 | `apiserver`, `kubelet` (+cAdvisor, probes), `coredns` | API-сервер, узел и контейнеры (CPU, память по подам) |
 | `kube-controller-manager`, `kube-scheduler` | control plane: HTTPS на IP узла, токен ServiceAccount Prometheus |
 | `etcd-metrics` | etcd через kube-rbac-proxy (`<IP узла>:2382`, см. «Особенности») |
-| `node-exporter`, `kube-state-metrics` | узел (CPU, память, диск, сеть) и объекты Kubernetes, в т. ч. условия Gateway (`gatewayapi_gateway_status`) |
+| `node-exporter`, `kube-state-metrics` | узел (CPU, память, диск, сеть; HTTPS через kube-rbac-proxy, см. «Особенности») и объекты Kubernetes, в т. ч. условия Gateway (`gatewayapi_gateway_status`) |
 | `cilium-agent`, `cilium-operator`, `cilium-envoy`, `hubble-metrics`, `hubble-relay-metrics` | CNI и сетевые потоки Hubble (DNS, drop, TCP, HTTP) |
 | `cert-manager`, `cainjector`, `webhook` | выпуск сертификатов |
-| `fluentd` | Fluentd: прочитанные записи по namespace, буфер, ретраи, ошибки вывода |
+| `fluentd` | Fluentd: прочитанные записи по namespace пода (метка `kube_namespace`: `namespace` у цели уже занят — это namespace самого Fluentd), буфер, ретраи, ошибки вывода |
 | `victoria-logs` | хранилище логов: приём, запросы, диск |
 | `kube-prometheus-stack-*` | сам Prometheus, Alertmanager, Grafana, оператор |
 
@@ -285,15 +374,22 @@ VictoriaLogs. Источник данных VictoriaLogs — плагин
 | `HighP95Latency` | p95 времени ответа приложения выше 0,5 с, 5 мин |
 | `GatewayNotProgrammed` | у Gateway `public` условие `Programmed` не `True` (или Gateway нет), 5 мин |
 | `GatewayProxyDown` | ни один Envoy-прокси не отвечает Prometheus, 2 мин |
-| `FluentdDown` | Fluentd недоступен, 5 мин |
-| `FluentdNoOutput` | Fluentd читает логи, но 10 мин ничего не отправил в VictoriaLogs |
+| `FluentdDown`, `FluentdMissing` | под Fluentd не отвечает 5 мин; целей Fluentd нет совсем 5 мин |
+| `FluentdNoOutput` | Fluentd читает логи, а VictoriaLogs 5 мин не принимает ни одной строки (`vl_rows_ingested_total` не растёт или VictoriaLogs недоступна) — судим по принимающей стороне: счётчик записей Fluentd растёт и на неудачных попытках |
 | `FluentdBufferErrors`, `FluentdBufferAlmostFull` | ретраи/ошибки отправки; буфер заполнен больше чем на 80 % |
-| `ControlPlaneTargetDown`, `EtcdMetricsMissing` | API-сервер, controller-manager, scheduler или etcd не отдают метрики |
+| `EtcdMetricsMissing` | метрики etcd (через прокси) не собираются 5 мин |
 
-Плюс стандартные правила kube-prometheus-stack (узел, поды, etcd, API-сервер
-и т. д.). Демонстрация: `kubectl -n demo scale deploy/web-v1 --replicas=0`
-→ через ~1,5 мин `AppDown` в состоянии firing; вернуть —
-`--replicas=2`.
+Плюс стандартные правила kube-prometheus-stack (узел, поды, etcd, API-сервер,
+controller-manager, scheduler — `KubeAPIDown`, `KubeControllerManagerDown`,
+`KubeSchedulerDown`, `TargetDown` и т. д.). Демонстрация:
+
+- `kubectl -n demo scale deploy/web-v1 --replicas=0` → через ~1,5 мин
+  `AppDown` в состоянии firing; вернуть — `--replicas=2`;
+- `kubectl -n logging scale statefulset/victoria-logs --replicas=0` →
+  `FluentdNoOutput` pending в пределах минуты, через 5 мин firing;
+  вернуть — `--replicas=1`: через 1–2 мин алерт снимается, а логи за время
+  простоя дозагружаются из буфера Fluentd (запрос, отправленный во время
+  простоя, находится по своему `X-Request-ID`).
 
 ### Логи (Fluentd → VictoriaLogs)
 
@@ -316,16 +412,20 @@ containerd режет на части (`P`/`F`), склеиваются обра
 `kubernetes_metadata` добавляет `kubernetes.namespace_name`,
 `kubernetes.pod_name`, `kubernetes.container_name`, образ, узел и метки
 пода. JSON access-логов раскладывается в поля, исходная строка остаётся в
-сообщении.
+сообщении; временем записи становится время запроса из самого лога (поле
+`time`: у Angie — `$time_iso8601`, у Envoy — `%START_TIME%`), у остальных
+строк — время записи containerd.
 
 **Куда уходит.** Штатный плагин `out_http` → VictoriaLogs
 `/insert/jsonline` (заголовки `VL-Msg-Field: message`, `VL-Time-Field:
 date`, `VL-Stream-Fields`: namespace, pod, container). Буфер — файл на узле
 (`/var/lib/fluentd`), сброс каждые 2 с, повтор с нарастающей паузой до
 восстановления VictoriaLogs, при переполнении (256 МБ) отбрасываются самые
-старые части. Запись появляется в VictoriaLogs через 5–15 с (Envoy сам
-сбрасывает свой лог раз в ~10 с). VictoriaLogs хранит логи 7 дней, но не
-больше 4 ГБ (PVC 5 ГиБ).
+старые части; пачку, которую VictoriaLogs отвергла насовсем (4xx), Fluentd
+отбрасывает с предупреждением в своём логе, а не копит в каталоге резервных
+копий (`disable_chunk_backup`). Запись появляется в VictoriaLogs через
+5–15 с (Envoy сам сбрасывает свой лог раз в ~10 с). VictoriaLogs хранит
+логи 7 дней, но не больше 2 ГБ (PVC 3 ГиБ).
 
 **Проверка с уникальным `X-Request-ID`** (на узле, `c` и `ca.crt` — как в
 разделе «Gateway и приложение»):
@@ -354,6 +454,32 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
 В Grafana те же логи — Explore → источник VictoriaLogs или нижние панели
 дашборда «Demo app — golden signals».
 
+### Безопасность (шаг 8)
+
+```bash
+# без пароля — 401
+curl -s -o /dev/null -w '%{http_code}\n' --resolve prometheus.demo.local:443:$IP --cacert ca.crt https://prometheus.demo.local/
+curl -s -o /dev/null -w '%{http_code}\n' --resolve logs.demo.local:443:$IP --cacert ca.crt https://logs.demo.local/select/vmui/
+# служебные и пишущие пути через Gateway не проходят даже с паролем — 404
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:<пароль> -X POST --resolve prometheus.demo.local:443:$IP --cacert ca.crt https://prometheus.demo.local/-/quit
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:<пароль> -X POST --resolve logs.demo.local:443:$IP --cacert ca.crt https://logs.demo.local/insert/jsonline
+# etcd :2381 снаружи не слушает; прокси метрик etcd без токена — 401
+curl -m 5 http://$IP:2381/metrics                                   # Connection refused
+curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics
+# node-exporter и метрики Cilium с другой машины закрыты (на узле: 9100 -> 401)
+curl -m 5 -k https://$IP:9100/metrics                               # Connection refused
+curl -m 5 http://$IP:9962/metrics                                   # Connection refused
+```
+
+Сетевые политики изнутри кластера (под в `demo` не достаёт до Prometheus и
+VictoriaLogs, а через Gateway приложение доступно):
+
+```bash
+kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimages/curl:8.16.0 \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-check","image":"docker.io/curlimages/curl:8.16.0","args":["-sS","-m","5","-X","POST","http://kube-prometheus-stack-prometheus.monitoring:9090/-/quit"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+# curl: (28) Connection timed out — пакеты отброшены политикой
+```
+
 ## Особенности
 
 - **Метка `node.kubernetes.io/exclude-from-external-load-balancers`.** kubeadm
@@ -376,30 +502,93 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
   kube-rbac-proxy слушает `<IP узла>:2382` по TLS (сертификат от cert-manager,
   CA `demo-ca`), проверяет токен (TokenReview) и право `get` на
   `/metrics` (SubjectAccessReview) и только тогда проксирует запрос в
-  `127.0.0.1:2381`; другие пути — 404. Prometheus ходит с токеном отдельного
-  ServiceAccount `etcd-metrics-scraper`, которому разрешено только
-  `get /metrics`, и проверяет сертификат прокси по CA. Без токена — 401, с
-  токеном без прав — 403:
+  `127.0.0.1:2381`; другие пути — 404. Проверяется не общее право
+  `get /metrics` (оно есть у любого, кто читает метрики, и открывает заодно
+  метрики API-сервера), а узкое: `get` подресурса `services/metrics` у
+  Service `monitoring-node/etcd-metrics` (`--config-file`,
+  `authorization.resourceAttributes`). Это право Role выдаёт только
+  ServiceAccount Prometheus. Prometheus предъявляет свой собственный токен —
+  проецируемый, короткоживущий, его ротирует kubelet (`bearerTokenFile` в
+  ServiceMonitor), а не долгоживущий токен из Secret; сертификат прокси
+  проверяется по CA. Без токена — 401, с токеном без этого права — 403:
 
   ```bash
   curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics   # 401
+  T=$(kubectl -n demo create token default)
+  curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt -H "Authorization: Bearer $T" https://$IP:2382/metrics   # 403
   ```
+
+  Пробы прокси — HTTPS `/healthz` на отдельном порту 2383
+  (`--proxy-endpoints-port`): TCP-проба на основной порт засоряла бы лог
+  ошибками TLS handshake.
+- **node-exporter за kube-rbac-proxy.** Сам node-exporter слушает только
+  `127.0.0.1`, а порт узла 9100 обслуживает kube-rbac-proxy: TLS (сертификат
+  от cert-manager), токен и то же узкое право (`get services/<имя>` у своего
+  Service), выданное только Prometheus. Контейнеры — без capabilities, без
+  повышения привилегий, seccomp `RuntimeDefault`. Без токена — 401.
+- **Порты метрик на узле закрыты для сети.** Компоненты с host network слушают
+  все адреса узла: Cilium — 9962 (cilium-agent), 9963 (оператор), 9964 (его Envoy),
+  9965 (Hubble), без аутентификации; node-exporter — 9100 и 8888 (`/healthz`
+  прокси). Роль Ansible `node_firewall` ставит свою таблицу nftables
+  (`inet kubeadm_gateway_metrics`, юнит `kubeadm-gateway-metrics-firewall`,
+  переживает перезагрузку): на эти порты пускают только сам узел и сеть
+  подов (`10.244.0.0/16`, откуда ходит Prometheus), остальным — TCP reset.
+  Остальные порты и правила (SSH, 6443, 80/443, Cilium) таблица не трогает.
+  Выбрали nftables, а не host firewall Cilium: тот при первой же политике
+  узла запрещает всё, что не разрешено явно (риск отрезать SSH и
+  kubelet), а здесь правило одно и узкое. Проверка с другой машины:
+  `curl http://$IP:9962/metrics` → `Connection refused`. `make destroy`
+  снимает таблицу.
 - **Pod Security по namespaces.** `restricted` — `demo`, `gateway`,
-  `envoy-gateway-system`, `monitoring` (Prometheus, Alertmanager, Grafana,
-  оператор, kube-state-metrics) и `logging` (VictoriaLogs). Компонентам уровня узла
-  нужен хост, а это запрещает даже `baseline`, поэтому они вынесены в
-  отдельные namespaces с `privileged`: `monitoring-node` — node-exporter
-  (host network/PID, только чтение `/`, `/proc`, `/sys`) и прокси etcd (host
-  network); `logging-node` — Fluentd (hostPath `/var/log` только на чтение и
-  `/var/lib/fluentd` для позиций и буфера). Сами поды там без privileged и без
-  добавленных capabilities.
+  `envoy-gateway-system`, `cert-manager`, `monitoring` (Prometheus,
+  Alertmanager, Grafana, оператор, kube-state-metrics) и `logging`
+  (VictoriaLogs). Компонентам уровня узла нужен хост, а это запрещает даже
+  `baseline`, поэтому они вынесены в отдельные namespaces с `privileged`:
+  `monitoring-node` — node-exporter (host network/PID, только чтение `/`,
+  `/proc`, `/sys`) и прокси etcd (host network); `logging-node` — Fluentd
+  (hostPath каталогов логов подов только на чтение и `/var/lib/fluentd` для
+  позиций и буфера); `local-path-storage` — local-path-provisioner создаёт
+  каталоги томов на узле вспомогательными подами с hostPath. Сами поды там
+  без privileged и без добавленных capabilities. `kube-system` остаётся как
+  его создаёт kubeadm (статические поды control plane, поды Cilium).
 - **Fluentd от root, но без capabilities.** Файлы логов контейнеров
-  принадлежат root с правами `0640`, поэтому Fluentd работает с uid 0. Всё
-  остальное закрыто: все capabilities сброшены (root без
-  `CAP_DAC_OVERRIDE` читает только свои файлы — это и есть логи), запрет
+  принадлежат root с правами `0640`, поэтому Fluentd работает с uid 0 и
+  читает их как владелец. Остальное закрыто: все capabilities сброшены (без
+  `CAP_DAC_OVERRIDE` обычные права файлов действуют и для root), запрет
   повышения привилегий, корневая ФС только для чтения, seccomp
-  `RuntimeDefault`, `/var/log` смонтирован только на чтение. Права к API —
-  только `get/list/watch` подов и namespaces (метаданные).
+  `RuntimeDefault`. С узла смонтированы только `/var/log/pods` и
+  `/var/log/containers` (только чтение; символьные ссылки во втором ведут в
+  первый, пути внутри контейнера те же) и `/var/lib/fluentd` — больше
+  ничего из файлов узла Fluentd не видит. Права к API — только
+  `get/list/watch` подов и namespaces (метаданные).
+- **Сетевые политики.** Cilium применяет стандартные NetworkPolicy. Во всех
+  наших namespaces (`demo`, `gateway`, `envoy-gateway-system`,
+  `cert-manager`, `local-path-storage`, `monitoring`, `monitoring-node`,
+  `logging`, `logging-node`) входящий трафик запрещён по умолчанию
+  (`default-deny-ingress`), разрешено только:
+
+  | Куда | Откуда |
+  |---|---|
+  | приложение `demo`, порт 8080 | Envoy-прокси Gateway |
+  | метрики всех компонентов (Angie 9113, Envoy 19001, cert-manager 9402, Fluentd 24231, VictoriaLogs 9428, всё в `monitoring`) | Prometheus |
+  | Prometheus 9090, Alertmanager 9093 | Grafana, Envoy-прокси (UI) |
+  | Grafana 3000 | Envoy-прокси (UI) |
+  | VictoriaLogs 9428 | Fluentd (запись), Grafana и Envoy-прокси (чтение), Prometheus |
+  | Envoy-прокси 10080/10443 (Gateway 80/443) | откуда угодно |
+  | вебхуки cert-manager (10250) и Envoy Gateway (9443) | API-сервер (порт открыт для всех: вебхук — это TLS, принимает только AdmissionReview) |
+  | внутри `envoy-gateway-system` | прокси ↔ контроллер (xDS) |
+
+  Трафик с самого узла (пробы kubelet, API-сервер) Cilium пропускает всегда.
+  Исходящий трафик не ограничиваем: поды ходят в API-сервер, DNS, Grafana
+  скачивает плагин, а запрет входящего уже закрывает главное — например, из
+  пода в `demo` нельзя ни остановить Prometheus (`/-/quit`), ни записать
+  логи в VictoriaLogs (`/insert`). Политики — в `charts/network-policies`
+  (список namespaces и правил — в `values/network-policies.yaml.gotmpl`), для
+  `demo` — в чарте приложения.
+- **Grafana видит только свой namespace.** Сайдкары Grafana читают дашборды и
+  источники данных только из ConfigMap в `monitoring` (все наши дашборды
+  лежат там, включая дашборд VictoriaLogs); Secret'ы не читают вовсе. Права —
+  Role в `monitoring` на `get/list/watch` ConfigMap, без ClusterRole.
 - **Порядок CRD Prometheus Operator.** ServiceMonitor есть почти у каждого
   чарта, начиная с Cilium, поэтому CRD Prometheus Operator ставятся самым
   первым релизом (`prometheus-operator-crds` той же версии, что оператор в
@@ -411,12 +600,17 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
 - **Пароль Grafana.** Генерируется при первом деплое в Secret
   `monitoring/grafana-admin` (`scripts/ensure-grafana-admin.sh`, тем же
   способом, что пароль basic auth) и подключается в Grafana через
-  `admin.existingSecret`; повторный деплой его не меняет. Prometheus и vmui
+  `admin.existingSecret`; повторный деплой его не меняет. Если Secret
+  удалили, `make platform` создаёт новый пароль и перезапускает Grafana —
+  иначе она продолжала бы принимать старый, а `make ui` показывал бы новый.
+  Prometheus и vmui
   своей аутентификации не имеют, их закрывает basic auth на Gateway; у
   Grafana — свой вход.
 - **Пробы не портят метрики.** Счётчики Angie ведутся по ключу: проверки
   kubelet (`/healthz`) идут в зону `probes`, трафик приложения — в зону
-  `app`, поэтому RPS и раскладка по версиям считаются без шума проб.
+  `app`, поэтому RPS и раскладка по версиям считаются без шума проб. Общая
+  зона `server`, в которой живут эти ключи, всегда нулевая — её серии
+  отбрасываются при сборе (`metricRelabelings`).
 - **Чужой apt-репозиторий с kubeadm** (например, packages.microsoft.com на
   раннерах GitHub): пакеты `kubeadm kubelet kubectl kubernetes-cni cri-tools`
   закреплены за pkgs.k8s.io (`/etc/apt/preferences.d/kubernetes`, приоритет
@@ -459,9 +653,11 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
   Secret не пересоздаётся, а удалённый — восстанавливается при следующем
   `make platform`. Пароль передаётся `kubectl` через stdin и не виден в
   списке процессов. Хеш `{SHA}` (SHA-1 без соли) — ограничение Envoy Gateway;
-  это допустимо, потому что пароль случайный, 128 бит. Маршруты на UI
-  добавляются списком `uiRoutes` в values чарта `gateway` (флаг
-  `basicAuth: true` включает защиту).
+  это допустимо, потому что пароль случайный, 128 бит. Маршруты на UI —
+  отдельный релиз `ui-routes` (список `routes` в
+  `values/ui-routes.yaml.gotmpl`: `basicAuth: true` включает защиту,
+  `allow` — какие методы и пути пропускать). Публикация приложения от него
+  не зависит: релиз `gateway` не ждёт мониторинга и логов.
 - **Приложение без root.** Angie работает от пользователя образа (uid 100),
   корневая ФС только для чтения (pid и временные файлы — в emptyDir),
   capabilities сброшены, seccomp `RuntimeDefault`; порты 8080 (HTTP) и 9113
@@ -483,3 +679,10 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
   перезапуск подов, но не потерю узла.
 - **Алерты никуда не отправляются**: в Alertmanager нет получателей, алерты
   видны в UI Prometheus, Alertmanager и Grafana.
+- **Сетевые политики и закрытие портов метрик рассчитаны на один узел.**
+  Вебхуки и пробы kubelet проходят как трафик самого узла; на нескольких
+  узлах понадобятся правила для соседних узлов (`ipBlock` их адресов), а в
+  таблицу nftables — их адреса. Исходящий трафик подов не ограничен.
+- **Сеть при развёртывании.** Короткие сбои сети (репозитории чартов,
+  реестры образов) переживаются повторами, но долгий обрыв прерывает
+  развёртывание — тогда достаточно запустить `./deploy.sh` ещё раз.

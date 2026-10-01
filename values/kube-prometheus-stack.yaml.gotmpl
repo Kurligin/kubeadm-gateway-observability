@@ -41,9 +41,11 @@ prometheus:
   prometheusSpec:
     scrapeInterval: 30s
     evaluationInterval: 30s
-    # Three days of metrics, capped in size so the node disk never fills up.
+    # Three days of metrics, capped in size so the node disk never fills up
+    # (the oldest blocks are dropped first; the PVC below leaves room for the
+    # write-ahead log and compaction on top of this cap).
     retention: 3d
-    retentionSize: 6GB
+    retentionSize: 3GB
     # UI is published through the Gateway (basic auth).
     externalUrl: {{ printf "https://prometheus.%s" .Values.domain | quote }}
     # Pick up ServiceMonitors, PodMonitors, Probes and PrometheusRules from
@@ -66,7 +68,7 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 8Gi
+              storage: 4Gi
 
 # --- Alertmanager ---
 # One replica, no external receivers: alerts are visible in the
@@ -74,6 +76,8 @@ prometheus:
 alertmanager:
   alertmanagerSpec:
     replicas: 1
+    # UI is published through the Gateway (basic auth).
+    externalUrl: {{ printf "https://alertmanager.%s" .Values.domain | quote }}
     retention: 24h
     resources:
       requests:
@@ -124,11 +128,31 @@ grafana:
         memory: 48Mi
       limits:
         memory: 128Mi
+    # Dashboards and datasources come only from ConfigMaps in Grafana's own
+    # namespace (kube-prometheus-stack, observability-extras and the
+    # VictoriaLogs chart all put them there); Secrets are never watched.
     dashboards:
-      # Dashboards with this label in any namespace (observability-extras).
-      searchNamespace: ALL
+      searchNamespace: {{ .Values.monitoring.namespace | quote }}
+      resource: configmap
     datasources:
-      searchNamespace: ALL
+      searchNamespace: {{ .Values.monitoring.namespace | quote }}
+      resource: configmap
+  # Least privilege for the sidecars: a Role (not a ClusterRole) in the
+  # monitoring namespace that can read ConfigMaps only. The chart's own Role
+  # would also grant Secrets, so it is replaced by the one below.
+  rbac:
+    namespaced: true
+    useExistingRole: grafana-configmap-reader
+  extraObjects:
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: grafana-configmap-reader
+        namespace: {{ .Values.monitoring.namespace | quote }}
+      rules:
+        - apiGroups: [""]
+          resources: ["configmaps"]
+          verbs: ["get", "list", "watch"]
 
 # --- Control plane ---
 # kubeadm static pods; the node address is the API server address.
@@ -218,6 +242,11 @@ kube-state-metrics:
 # --- node-exporter ---
 # Needs the host network and PID namespace: lives in its own namespace with
 # Pod Security "privileged", so "monitoring" itself can stay "restricted".
+# node-exporter itself listens on 127.0.0.1 only; the node port 9100 is
+# served by kube-rbac-proxy: TLS (certificate from the demo CA, see
+# extraManifests below), and a request is forwarded only if its bearer token
+# may "get services/<name>/<name>" in this namespace (SubjectAccessReview);
+# only Prometheus' ServiceAccount is allowed to. Without a token: 401.
 prometheus-node-exporter:
   namespaceOverride: {{ .Values.monitoring.nodeNamespace | quote }}
   resources:
@@ -226,3 +255,97 @@ prometheus-node-exporter:
       memory: 24Mi
     limits:
       memory: 64Mi
+  securityContext:
+    fsGroup: 65534
+    runAsGroup: 65534
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  kubeRBACProxy:
+    enabled: true
+    image:
+      tag: {{ printf "v%s" .Values.versions.KUBE_RBAC_PROXY_VERSION | quote }}
+    tls:
+      enabled: true
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+    resources:
+      requests:
+        cpu: 5m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+  tlsSecret:
+    enabled: true
+    secretName: {{ .Values.nodeExporter.tlsSecret | quote }}
+    volumeName: tls
+  prometheus:
+    monitor:
+      scheme: https
+      # Prometheus' own ServiceAccount token (projected, short-lived,
+      # rotated by the kubelet), not a long-lived token Secret.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        serverName: {{ printf "%s.%s.svc" .Values.nodeExporter.name .Values.monitoring.nodeNamespace | quote }}
+        ca:
+          secret:
+            name: {{ .Values.nodeExporter.tlsSecret | quote }}
+            key: ca.crt
+
+extraManifests:
+  # Serving certificate of the node-exporter proxy.
+  - apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: {{ .Values.nodeExporter.tlsSecret | quote }}
+      namespace: {{ .Values.monitoring.nodeNamespace | quote }}
+    spec:
+      secretName: {{ .Values.nodeExporter.tlsSecret | quote }}
+      # No commonName: the Service DNS name is longer than its 64-byte limit.
+      dnsNames:
+        - {{ printf "%s.%s.svc" .Values.nodeExporter.name .Values.monitoring.nodeNamespace | quote }}
+      usages:
+        - server auth
+      privateKey:
+        algorithm: ECDSA
+        size: 256
+      issuerRef:
+        group: cert-manager.io
+        kind: ClusterIssuer
+        name: demo-ca
+  # The permission kube-rbac-proxy checks (its config file asks for
+  # "get services/<name>/<name>"), granted to Prometheus only.
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: node-exporter-metrics-reader
+      namespace: {{ .Values.monitoring.nodeNamespace | quote }}
+    rules:
+      - apiGroups: [""]
+        resources: [{{ printf "services/%s" .Values.nodeExporter.name | quote }}]
+        resourceNames: [{{ .Values.nodeExporter.name | quote }}]
+        verbs: ["get"]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: node-exporter-metrics-reader
+      namespace: {{ .Values.monitoring.nodeNamespace | quote }}
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: node-exporter-metrics-reader
+    subjects:
+      - kind: ServiceAccount
+        name: {{ .Values.monitoring.prometheusServiceAccount | quote }}
+        namespace: {{ .Values.monitoring.namespace | quote }}

@@ -14,6 +14,9 @@ spec:
     metadata:
       labels:
         {{- include "etcd-metrics-proxy.labels" . | nindent 8 }}
+      annotations:
+        # Restart the proxy when its authorisation config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ .Chart.Name }}
       # etcd runs on control-plane nodes and serves metrics on their
@@ -40,6 +43,10 @@ spec:
             - --secure-listen-address=$(NODE_IP):{{ .Values.listenPort }}
             - --upstream={{ .Values.upstream }}
             - --allow-paths={{ join "," .Values.allowPaths }}
+            - --config-file=/etc/kube-rbac-proxy/config/config.yaml
+            # /healthz for the probes on a separate port, so they neither
+            # need a token nor log TLS handshake errors (as TCP probes do).
+            - --proxy-endpoints-port={{ .Values.healthPort }}
             - --tls-cert-file=/etc/kube-rbac-proxy/tls/tls.crt
             - --tls-private-key-file=/etc/kube-rbac-proxy/tls/tls.key
             - --tls-min-version=VersionTLS12
@@ -52,13 +59,20 @@ spec:
             - name: https-metrics
               containerPort: {{ .Values.listenPort }}
               protocol: TCP
+            - name: https-health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
           readinessProbe:
-            tcpSocket:
-              port: https-metrics
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: https-health
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
-              port: https-metrics
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: https-health
             initialDelaySeconds: 10
             periodSeconds: 20
           securityContext:
@@ -73,7 +87,13 @@ spec:
             - name: tls
               mountPath: /etc/kube-rbac-proxy/tls
               readOnly: true
+            - name: config
+              mountPath: /etc/kube-rbac-proxy/config
+              readOnly: true
       volumes:
+        - name: config
+          configMap:
+            name: {{ .Chart.Name }}
         # Renewed by cert-manager; the proxy reloads the files.
         - name: tls
           secret:

@@ -3,5 +3,9 @@ image:
 
 nodeIP: {{ .Values.nodeIP | quote }}
 
+scraper:
+  serviceAccount: {{ .Values.monitoring.prometheusServiceAccount | quote }}
+  namespace: {{ .Values.monitoring.namespace | quote }}
+
 serviceMonitor:
   enabled: {{ .Values.serviceMonitors }}

@@ -113,18 +113,22 @@ data:
       </filter>
 
       # JSON access logs (Angie, Envoy): every key becomes a field
-      # (status, uri, x_request_id, ...). The original line stays in
-      # "message" and the event time stays the CRI timestamp; other lines
-      # (not JSON) pass through unchanged.
+      # (status, uri, x_request_id, ...) and the request time written by the
+      # application ("time", ISO 8601) becomes the event time, so a log line
+      # is placed by when the request happened, not when containerd wrote it.
+      # The original line stays in "message"; other lines (not JSON) pass
+      # through unchanged with the CRI timestamp.
       <filter {{ join " " .Values.jsonLogs }}>
         @type parser
         key_name message
         reserve_data true
-        reserve_time true
+        reserve_time false
         emit_invalid_record_to_error false
         <parse>
           @type json
+          time_key time
           time_type string
+          time_format %iso8601
           keep_time_key true
         </parse>
       </filter>
@@ -151,21 +155,25 @@ data:
         </record>
       </filter>
 
-      # Incoming records per namespace (fluentd_input_status_num_records_total).
+      # Incoming records per namespace of the log's pod
+      # (fluentd_input_status_num_records_total{kube_namespace=...}). Not
+      # "namespace": Prometheus already sets that label to Fluentd's own
+      # namespace, and the clash would rename this one to exported_namespace.
       <filter kube.**>
         @type prometheus
         <metric>
           name fluentd_input_status_num_records_total
           type counter
-          desc Records read from container logs
+          desc Records read from container logs, by namespace of the pod
           <labels>
-            namespace $.kubernetes.namespace_name
+            kube_namespace $.kubernetes.namespace_name
           </labels>
         </metric>
       </filter>
 
-      # Event time (CRI timestamp, nanoseconds) as a field: out_http sends
-      # only the record, VictoriaLogs takes _time from "date".
+      # Event time (request time of access logs, CRI timestamp of anything
+      # else) as a field: out_http sends only the record, VictoriaLogs takes
+      # _time from "date".
       <filter kube.**>
         @type record_transformer
         enable_ruby true
@@ -202,6 +210,10 @@ data:
           retry_wait 1s
           retry_max_interval {{ .Values.buffer.retryMaxInterval }}
           retry_forever true
+          # A chunk VictoriaLogs rejects for good (4xx) is dropped with a
+          # warning instead of being copied to a backup directory that
+          # nothing cleans up.
+          disable_chunk_backup true
         </buffer>
       </match>
     </label>

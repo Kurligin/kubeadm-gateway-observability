@@ -1,0 +1,28 @@
+---
+# Hostnames are <host>.<domain>; the Gateway certificate covers *.<domain>.
+domain: demo.local
+
+# Gateway (and its HTTPS listener) the routes attach to; the routes live in
+# the Gateway's namespace (the release namespace).
+gateway:
+  name: public
+  listener: https
+
+# htpasswd Secret in the release namespace (key ".htpasswd"), created by
+# scripts/ensure-basic-auth.sh. Used by routes with basicAuth: true.
+basicAuth:
+  secretName: ui-basic-auth
+
+# One HTTPRoute per entry:
+#   - host: prometheus            # hostname prometheus.<domain>
+#     namespace: monitoring       # Service namespace (ReferenceGrant there)
+#     service: kube-prometheus-stack-prometheus
+#     port: 9090
+#     basicAuth: true             # SecurityPolicy with basic auth
+#     allow:                      # optional; what is forwarded at all
+#       - method: GET             # any path
+#       - method: POST
+#         pathPrefix: /api/v1
+# Without "allow" every request is forwarded. A request that matches no
+# entry gets 404 from Envoy and never reaches the backend.
+routes: []

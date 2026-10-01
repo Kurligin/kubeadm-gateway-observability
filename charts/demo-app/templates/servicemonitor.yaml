@@ -23,4 +23,10 @@ spec:
     - port: metrics
       path: /p8s
       interval: {{ .Values.serviceMonitor.interval }}
+      metricRelabelings:
+        # "status_zone <variable> zone=server" also exports the shared zone
+        # "server" itself, always zero; only its keys (app, probes) count.
+        - sourceLabels: [__name__, zone]
+          regex: "angie_http_server_zones_.+;server"
+          action: drop
 {{- end }}

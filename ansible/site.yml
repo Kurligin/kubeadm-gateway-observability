@@ -6,6 +6,7 @@
   become: true
   roles:
     - role: node_prep
+    - role: node_firewall
     - role: containerd
     - role: kube_packages
     - role: kubeadm_init

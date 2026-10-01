@@ -1,0 +1,56 @@
+{{- range .Values.routes }}
+{{- $name := printf "ui-%s" .host }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "ui-routes.labels" $ | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $.Values.gateway.name }}
+      sectionName: {{ $.Values.gateway.listener }}
+  hostnames:
+    - {{ printf "%s.%s" .host $.Values.domain | quote }}
+  rules:
+    - {{- with .allow }}
+      # Only these methods/paths are forwarded; anything else is 404.
+      matches:
+        {{- range . }}
+        - method: {{ .method }}
+          path:
+            type: PathPrefix
+            value: {{ .pathPrefix | default "/" | quote }}
+        {{- end }}
+      {{- end }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ .service }}
+          namespace: {{ .namespace }}
+          port: {{ .port }}
+{{- if .basicAuth }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "ui-routes.labels" $ | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  basicAuth:
+    users:
+      group: ""
+      kind: Secret
+      name: {{ $.Values.basicAuth.secretName }}
+{{- end }}
+{{- end }}

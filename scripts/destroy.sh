@@ -2,7 +2,8 @@
 # Tear down the kubeadm cluster on this host so that `make deploy` can build
 # it again from scratch. Installed packages, binaries and the download cache
 # are kept (re-deploy is faster and still pinned by versions.env). Only state
-# created by kubeadm, kubelet, Cilium and this repository is removed.
+# created by kubeadm, kubelet, Cilium and this repository is removed: volumes
+# (local-path), Fluentd positions and buffer, pod logs, the metrics firewall.
 # Called by `make destroy FORCE=1`.
 set -euo pipefail
 
@@ -11,6 +12,16 @@ readonly ADMIN_CONF="/etc/kubernetes/admin.conf"
 # Rendered by the kubeadm_init role; kubeadm reset leaves it behind.
 readonly KUBEADM_CONFIG="/etc/kubernetes/kubeadm-config.yaml"
 readonly LOCAL_PATH_DIR="/opt/local-path-provisioner"
+# Fluentd tail positions and output buffer (charts/logging, hostStateDir).
+readonly FLUENTD_STATE_DIR="/var/lib/fluentd"
+# Container logs of the removed pods: a new Fluentd (with fresh tail
+# positions) would otherwise ship them again.
+readonly POD_LOG_DIRS=("/var/log/pods" "/var/log/containers")
+# Metrics firewall (Ansible role node_firewall).
+readonly FIREWALL_SERVICE="kubeadm-gateway-metrics-firewall"
+readonly FIREWALL_UNIT="/etc/systemd/system/${FIREWALL_SERVICE}.service"
+readonly FIREWALL_RULES="/etc/kubeadm-gateway/metrics-firewall.nft"
+readonly FIREWALL_TABLE="kubeadm_gateway_metrics"
 readonly CILIUM_CNI_CONF="/etc/cni/net.d/05-cilium.conflist"
 readonly CILIUM_SYSCTL_CONF="/etc/sysctl.d/99-zzz-override_cilium.conf"
 readonly BPF_FS="/sys/fs/bpf"
@@ -92,6 +103,32 @@ cleanup_iptables() {
   done
 }
 
+cleanup_firewall() {
+  if as_root test -f "${FIREWALL_UNIT}"; then
+    log "Removing the metrics firewall (${FIREWALL_SERVICE})"
+    # Stopping the unit deletes its nftables table.
+    as_root systemctl disable --now "${FIREWALL_SERVICE}.service" >/dev/null 2>&1 || true
+    as_root rm -f "${FIREWALL_UNIT}"
+    as_root systemctl daemon-reload
+  fi
+  if command -v nft >/dev/null 2>&1 && as_root nft list table inet "${FIREWALL_TABLE}" >/dev/null 2>&1; then
+    as_root nft delete table inet "${FIREWALL_TABLE}"
+  fi
+  as_root rm -f "${FIREWALL_RULES}"
+  as_root rmdir --ignore-fail-on-non-empty "$(dirname "${FIREWALL_RULES}")" 2>/dev/null || true
+}
+
+cleanup_node_state() {
+  log "Removing Fluentd state (${FLUENTD_STATE_DIR}) and logs of the removed pods"
+  as_root rm -rf --one-file-system "${FLUENTD_STATE_DIR}"
+  local dir
+  for dir in "${POD_LOG_DIRS[@]}"; do
+    if as_root test -d "${dir}"; then
+      as_root find "${dir}" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} +
+    fi
+  done
+}
+
 main() {
   # Fingerprint admin.conf before kubeadm reset deletes it.
   local admin_sha=""
@@ -112,6 +149,9 @@ main() {
 
   log "Removing local-path volumes (${LOCAL_PATH_DIR})"
   as_root rm -rf --one-file-system "${LOCAL_PATH_DIR}"
+
+  cleanup_node_state
+  cleanup_firewall
 
   log "Removing kubeconfig files"
   remove_kubeconfigs "${admin_sha}"

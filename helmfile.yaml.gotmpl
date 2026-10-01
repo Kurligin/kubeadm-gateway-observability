@@ -52,6 +52,14 @@ environments:
         monitoring:
           namespace: {{ $versions.MONITORING_NAMESPACE | quote }}
           nodeNamespace: {{ printf "%s-node" $versions.MONITORING_NAMESPACE | quote }}
+          # ServiceAccount of Prometheus (kube-prometheus-stack): the identity
+          # the metrics proxies of node-exporter and etcd let in.
+          prometheusServiceAccount: kube-prometheus-stack-prometheus
+        # node-exporter of kube-prometheus-stack (fullname = Service name)
+        # and the TLS Secret of its kube-rbac-proxy.
+        nodeExporter:
+          name: kube-prometheus-stack-prometheus-node-exporter
+          tlsSecret: node-exporter-tls
         # VictoriaLogs in "namespace", Fluentd in "nodeNamespace".
         logging:
           namespace: {{ $versions.LOGGING_NAMESPACE | quote }}
@@ -110,12 +118,13 @@ releases:
     namespace: local-path-storage
     chart: ./charts/local-path-provisioner
     needs:
-      - kube-system/cilium
+      - kube-system/namespaces
     values:
       - values/local-path-provisioner.yaml.gotmpl
 
   # Namespaces with Pod Security Admission labels. They must exist before the
-  # releases that live in them (Helm keeps its release record there).
+  # releases that live in them (Helm keeps its release record there), so
+  # their pods are admitted under these labels from the very first start.
   - name: namespaces
     namespace: kube-system
     chart: ./charts/namespaces
@@ -123,6 +132,18 @@ releases:
       - kube-system/cilium
     values:
       - values/namespaces.yaml.gotmpl
+
+  # Default-deny ingress and explicit allow rules for the platform
+  # namespaces (the demo namespace has its own, in the demo-app chart).
+  # Cilium enforces standard NetworkPolicies; traffic from the node itself
+  # (kubelet probes, API server -> webhooks) stays allowed.
+  - name: network-policies
+    namespace: kube-system
+    chart: ./charts/network-policies
+    needs:
+      - kube-system/namespaces
+    values:
+      - values/network-policies.yaml.gotmpl
 
   # CRDs come with the chart (crds.enabled); the post-install API check job
   # waits until the webhook serves requests, so issuers can be created next.
@@ -132,7 +153,7 @@ releases:
     version: {{ printf "v%s" .Values.versions.CERT_MANAGER_VERSION | quote }}
     disableValidationOnInstall: true
     needs:
-      - kube-system/cilium
+      - kube-system/namespaces
     values:
       - values/cert-manager.yaml.gotmpl
 
@@ -170,9 +191,12 @@ releases:
 
   # Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics.
   # Prometheus needs a PVC; kube-state-metrics exports Gateway API objects,
-  # so their CRDs (envoy-gateway presync hook) come first. Uses Prometheus
-  # Operator CRDs, so the first diff runs without cluster validation (same
-  # for every release below that ships a ServiceMonitor or rules).
+  # so their CRDs (envoy-gateway presync hook) come first; the node-exporter
+  # proxy gets its certificate from the demo CA (pki). The scrape targets
+  # and rules of observability-extras are installed before it, so they are
+  # part of Prometheus' very first configuration. Uses Prometheus Operator
+  # CRDs, so the first diff runs without cluster validation (same for every
+  # release below that ships a ServiceMonitor or rules).
   - name: kube-prometheus-stack
     namespace: {{ .Values.monitoring.namespace }}
     chart: prometheus-community/kube-prometheus-stack
@@ -182,6 +206,8 @@ releases:
       - kube-system/namespaces
       - local-path-storage/local-path-provisioner
       - envoy-gateway-system/envoy-gateway
+      - cert-manager/pki
+      - {{ printf "%s/observability-extras" .Values.monitoring.namespace }}
     values:
       - values/kube-prometheus-stack.yaml.gotmpl
     hooks:
@@ -253,11 +279,11 @@ releases:
           - daemonset/fluentd
 
   # Envoy scrape targets, alerting rules, dashboards, VictoriaLogs datasource.
-  # Needs only the CRDs and namespaces, so it is installed before Prometheus
-  # starts and is part of its very first configuration (a later change
-  # reaches Prometheus only after the kubelet refreshes the mounted config
-  # Secret, which can take minutes). Grafana sidecars pick up the dashboard
-  # and datasource ConfigMaps whenever they appear.
+  # Needs only the CRDs and namespaces; kube-prometheus-stack waits for it
+  # (needs), so it is part of Prometheus' very first configuration (a later
+  # change reaches Prometheus only after the kubelet refreshes the mounted
+  # config Secret, which can take minutes). Grafana sidecars pick up the
+  # dashboard and datasource ConfigMaps whenever they appear.
   - name: observability-extras
     namespace: {{ .Values.monitoring.namespace }}
     chart: ./charts/observability-extras
@@ -278,7 +304,9 @@ releases:
     values:
       - values/demo-app.yaml.gotmpl
 
-  # EnvoyProxy, GatewayClass, Gateway, TLS certificate, routes and policies.
+  # EnvoyProxy, GatewayClass, Gateway, TLS certificate, application routes
+  # and policies. Independent of the observability stack: the application
+  # is published even if monitoring or logging fail to install.
   - name: gateway
     namespace: {{ .Values.gateway.namespace }}
     chart: ./charts/gateway
@@ -288,11 +316,33 @@ releases:
       - cert-manager/pki
       - envoy-gateway-system/envoy-gateway
       - demo/demo-app
-      # UI routes (uiRoutes) point to their Services.
+    values:
+      - values/gateway.yaml.gotmpl
+    hooks:
+      # Helm does not wait for custom resources; finish only when Envoy is
+      # deployed and the Gateway has its address.
+      - events: ["postsync"]
+        showlogs: true
+        command: kubectl
+        args:
+          - {{ printf "--namespace=%s" .Values.gateway.namespace | quote }}
+          - wait
+          - --for=condition=Programmed
+          - --timeout=300s
+          - {{ printf "gateway/%s" .Values.gateway.name | quote }}
+
+  # Routes to the observability UIs (Grafana, Prometheus, Alertmanager,
+  # vmui) on the same Gateway, with basic auth where the UI has no login.
+  - name: ui-routes
+    namespace: {{ .Values.gateway.namespace }}
+    chart: ./charts/ui-routes
+    disableValidationOnInstall: true
+    needs:
+      - {{ printf "%s/gateway" .Values.gateway.namespace }}
       - {{ printf "%s/kube-prometheus-stack" .Values.monitoring.namespace }}
       - {{ printf "%s/victoria-logs" .Values.logging.namespace }}
     values:
-      - values/gateway.yaml.gotmpl
+      - values/ui-routes.yaml.gotmpl
     hooks:
       # Creates the Secret before the first install, so the policies that use
       # it never see it missing. Hooks run only when the release changes;
@@ -305,14 +355,3 @@ releases:
           - {{ .Values.gateway.namespace | quote }}
           - {{ .Values.basicAuth.secretName | quote }}
           - {{ .Values.basicAuth.username | quote }}
-      # Helm does not wait for custom resources; finish only when Envoy is
-      # deployed and the Gateway has its address.
-      - events: ["postsync"]
-        showlogs: true
-        command: kubectl
-        args:
-          - {{ printf "--namespace=%s" .Values.gateway.namespace | quote }}
-          - wait
-          - --for=condition=Programmed
-          - --timeout=300s
-          - {{ printf "gateway/%s" .Values.gateway.name | quote }}

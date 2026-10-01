@@ -2,10 +2,6 @@
 {{- $grants := dict }}
 {{- $appServices := list .Values.app.stable.service .Values.app.canary.service }}
 {{- $_ := set $grants .Values.app.namespace $appServices }}
-{{- range .Values.uiRoutes }}
-{{-   $current := get $grants .namespace | default list }}
-{{-   $_ := set $grants .namespace (append $current .service) }}
-{{- end }}
 {{- range $namespace, $services := $grants }}
 ---
 # Allows HTTPRoutes in the gateway namespace to use these Services.

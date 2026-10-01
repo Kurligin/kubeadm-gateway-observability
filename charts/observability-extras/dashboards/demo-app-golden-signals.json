@@ -631,70 +631,7 @@
       "gridPos": {
         "x": 0,
         "y": 14,
-        "w": 8,
-        "h": 8
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "5xx share",
-      "description": "Share of 5xx responses of the application route; the High5xxRate alert fires above 5 %.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/.*\", envoy_response_code_class=\"5\"}[$__rate_interval])) or vector(0)) / sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/.*\"}[$__rate_interval]))",
-          "legendFormat": "5xx share",
-          "refId": "A",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "id": 12,
-      "gridPos": {
-        "x": 8,
-        "y": 14,
-        "w": 8,
+        "w": 12,
         "h": 8
       }
     },
@@ -755,9 +692,9 @@
       },
       "id": 13,
       "gridPos": {
-        "x": 16,
+        "x": 12,
         "y": 14,
-        "w": 8,
+        "w": 12,
         "h": 8
       }
     },

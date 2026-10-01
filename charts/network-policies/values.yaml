@@ -1,0 +1,18 @@
+---
+# Pods that other namespaces let in, by namespace and pod labels.
+#   <peer>:
+#     namespace: monitoring
+#     labels: {app.kubernetes.io/name: prometheus}
+peers: {}
+
+# Every namespace listed gets a "default-deny-ingress" NetworkPolicy, plus one
+# NetworkPolicy per entry of "allow":
+#   - name: from-prometheus        # NetworkPolicy name
+#     pods: {app: x}               # target pods (labels); omit for all pods
+#     from: [prometheus, grafana]  # peers above, "same-namespace" (any pod
+#                                  # of this namespace) or "anywhere" (any
+#                                  # source, also outside the cluster)
+#     ports: [9090]                # TCP ports of the target pods; omit for all
+# Egress is not restricted. Traffic from the node itself (kubelet probes,
+# the API server calling webhooks) is always allowed by Cilium.
+namespaces: []

@@ -60,6 +60,21 @@ podDisruptionBudget:
 # gateway stops sending traffic before Angie exits.
 preStopSleepSeconds: 5
 
+# Ingress is denied by default; only the Gateway's Envoy proxies reach the
+# HTTP port and only Prometheus the metrics port. Egress is not restricted.
+# Kubelet probes come from the node itself, which Cilium always allows.
+networkPolicy:
+  enabled: true
+  gateway:
+    namespace: envoy-gateway-system
+    labels:
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/managed-by: envoy-gateway
+  prometheus:
+    namespace: monitoring
+    labels:
+      app.kubernetes.io/name: prometheus
+
 # Needs the Prometheus Operator CRDs (installed with kube-prometheus-stack).
 serviceMonitor:
   enabled: false

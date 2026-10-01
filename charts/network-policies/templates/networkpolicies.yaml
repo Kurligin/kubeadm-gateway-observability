@@ -1,0 +1,52 @@
+{{- range $ns := .Values.namespaces }}
+---
+# Nothing reaches the pods of {{ $ns.name }} unless a policy below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $ns.name }}
+  labels:
+    {{- include "network-policies.labels" $ | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+{{- range $ns.allow }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .name }}
+  namespace: {{ $ns.name }}
+  labels:
+    {{- include "network-policies.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    {{- with .pods }}
+    matchLabels:
+      {{- toYaml . | nindent 6 }}
+    {{- else }} {}
+    {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- if and (has "anywhere" .from) (not .ports) }}
+    - {}
+    {{- else }}
+    - {{- if not (has "anywhere" .from) }}
+      from:
+        {{- range .from }}
+        {{- include "network-policies.peer" (dict "root" $ "source" .) | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .ports }}
+      ports:
+        {{- range . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

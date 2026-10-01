@@ -1,0 +1,20 @@
+# kube-rbac-proxy authorisation: instead of the default check of the
+# non-resource URL "get /metrics" (which every metrics reader in the cluster
+# has, and which would also open the API server's own /metrics), ask the API
+# server whether the caller may "get services/metrics" of this Service.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    authorization:
+      resourceAttributes:
+        namespace: {{ .Release.Namespace }}
+        apiVersion: v1
+        resource: services
+        subresource: metrics
+        name: {{ include "etcd-metrics-proxy.serviceName" . }}

@@ -13,10 +13,23 @@ nodeIP: ""
 # authorised requests to the etcd metrics endpoint kubeadm leaves on the
 # node's loopback (plain HTTP, never reachable from outside the node).
 listenPort: 2382
+# /healthz of the proxy itself (HTTPS, same address), for the probes.
+healthPort: 2383
 upstream: http://127.0.0.1:2381/
 # Only the metrics path is proxied; anything else gets 404.
 allowPaths:
   - /metrics
+
+# Who may read the metrics: a request is forwarded only if its bearer token
+# may "get" the subresource services/metrics of this chart's Service
+# (SubjectAccessReview through the API server). Only this ServiceAccount
+# (Prometheus) gets that permission; the general "get /metrics" right does
+# not open the proxy, and this Role opens nothing else.
+scraper:
+  # Required, e.g. kube-prometheus-stack-prometheus
+  serviceAccount: ""
+  # Required, e.g. monitoring
+  namespace: ""
 
 # Serving certificate, issued by cert-manager.
 tls:

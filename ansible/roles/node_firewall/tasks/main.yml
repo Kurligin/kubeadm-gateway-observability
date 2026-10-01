@@ -1,0 +1,40 @@
+---
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    lock_timeout: "{{ node_prep_apt_lock_timeout | default(600) }}"
+
+- name: Create the rules directory
+  ansible.builtin.file:
+    path: "{{ node_firewall_rules_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the metrics firewall rules
+  ansible.builtin.template:
+    src: metrics-firewall.nft.j2
+    dest: "{{ node_firewall_rules_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: nft -c -f %s
+  notify: Reload metrics firewall
+
+- name: Install the metrics firewall unit
+  ansible.builtin.template:
+    src: metrics-firewall.service.j2
+    dest: "/etc/systemd/system/{{ node_firewall_service }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload metrics firewall
+
+- name: Enable and start the metrics firewall
+  ansible.builtin.systemd_service:
+    name: "{{ node_firewall_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true

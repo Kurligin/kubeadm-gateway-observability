@@ -21,8 +21,3 @@ etcd-metrics
 {{- define "etcd-metrics-proxy.tlsSecret" -}}
 etcd-metrics-tls
 {{- end }}
-
-{{/* ServiceAccount whose token Prometheus presents to the proxy. */}}
-{{- define "etcd-metrics-proxy.scraper" -}}
-etcd-metrics-scraper
-{{- end }}

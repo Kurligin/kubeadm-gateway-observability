@@ -102,32 +102,53 @@ spec:
         - alert: FluentdDown
           expr: |
             up{job="{{ .Values.logging.collectorJob }}"} == 0
-            or
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fluentd {{ "{{ $labels.pod }}" }} is down"
+            description: >-
+              Prometheus cannot scrape Fluentd {{ "{{ $labels.pod }}" }} for 5 minutes: container
+              logs of its node are not being shipped (they are read from the last
+              position once it is back).
+
+        - alert: FluentdMissing
+          expr: |
             absent(up{job="{{ .Values.logging.collectorJob }}"})
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "Fluentd is down or not scraped"
+            summary: "No Fluentd is scraped at all"
             description: >-
-              Fluentd ({{ "{{ $labels.pod }}" }}) has not been reachable for 5 minutes: container
-              logs of its node are not being shipped (they are read from the last
-              position once it is back).
+              Prometheus has no Fluentd target for 5 minutes: the DaemonSet is missing or
+              none of its pods is running, so no container logs are collected. Check
+              `kubectl -n {{ .Values.logging.namespace }} get daemonset,pods`.
 
+        # Judged by the receiving side: Fluentd's own write counter grows on
+        # failed attempts too, so it cannot tell that nothing arrives. The
+        # "up" term makes it pending at once when VictoriaLogs is down (the
+        # rate alone would still see the last samples for its whole window).
         - alert: FluentdNoOutput
           expr: |
-            (sum by (pod) (rate(fluentd_input_status_num_records_total[5m])) > 0)
-            unless on (pod)
-            (sum by (pod) (rate(fluentd_output_status_write_count{plugin_id="out_victorialogs"}[5m])) > 0)
-          for: 10m
+            (sum(rate(fluentd_input_status_num_records_total[5m])) > 0)
+            unless on ()
+            (
+              (sum(rate(vl_rows_ingested_total{job="{{ .Values.victoriaLogs.job }}"}[2m])) > 0)
+              and on ()
+              (sum(up{job="{{ .Values.victoriaLogs.job }}"}) > 0)
+            )
+          for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "Fluentd reads logs but sends nothing to VictoriaLogs"
+            summary: "Fluentd reads logs, but VictoriaLogs receives nothing"
             description: >-
-              {{ "{{ $labels.pod }}" }} keeps reading container logs, but its VictoriaLogs output
-              has not written a single chunk for 10 minutes. Check VictoriaLogs and
-              `kubectl logs` of the Fluentd pod.
+              Fluentd keeps reading container logs, but VictoriaLogs has not ingested a
+              single row for 5 minutes (or is not running). Logs pile up in the Fluentd
+              file buffer and are sent once VictoriaLogs is back; when the buffer is full,
+              the oldest are dropped. Check `kubectl -n {{ .Values.victoriaLogs.namespace }} get pods`
+              and the Fluentd logs.
 
         - alert: FluentdBufferErrors
           expr: |
@@ -156,22 +177,13 @@ spec:
               Only {{ "{{ $value | printf \"%.0f\" }}" }}% of the VictoriaLogs output buffer of
               {{ "{{ $labels.pod }}" }} is free; when it is full, the oldest logs are dropped.
 
-    # --- Control plane (kubeadm static pods) ---
+    # --- Control plane ---
+    # API server, controller-manager and scheduler are covered by the
+    # standard rules of kube-prometheus-stack (KubeAPIDown,
+    # KubeControllerManagerDown, KubeSchedulerDown, TargetDown); etcd is
+    # scraped through a proxy under its own job name, which they do not know.
     - name: control-plane
       rules:
-        - alert: ControlPlaneTargetDown
-          expr: |
-            up{job=~"apiserver|kube-controller-manager|kube-scheduler|etcd-metrics"} == 0
-          for: 2m
-          labels:
-            severity: critical
-          annotations:
-            summary: "{{ "{{ $labels.job }}" }} metrics endpoint is down"
-            description: >-
-              Prometheus cannot scrape {{ "{{ $labels.job }}" }} at {{ "{{ $labels.instance }}" }} for
-              2 minutes: the component is down or its metrics endpoint refuses the
-              request (TLS or RBAC). Check `kubectl -n kube-system get pods`.
-
         - alert: EtcdMetricsMissing
           expr: |
             absent(up{job="etcd-metrics"} == 1)
