@@ -1,0 +1,38 @@
+---
+# Envoy Gateway controller and the Envoy proxies it deploys.
+envoyGateway:
+  namespace: envoy-gateway-system
+  # Prefix of the Envoy cluster names of the application route
+  # (httproute/<gateway namespace>/<route name>/rule/<n>).
+  appClusterPrefix: httproute/gateway/app/
+
+# Demo application (Angie web-v1 / web-v2).
+app:
+  namespace: demo
+  deployments: [web-v1, web-v2]
+
+# Gateway checked by the GatewayNotProgrammed alert.
+gateway:
+  namespace: gateway
+  name: public
+
+# Namespace of the log collector (Fluentd).
+logging:
+  collectorJob: fluentd
+
+# Grafana datasource for VictoriaLogs (plugin victoriametrics-logs-datasource).
+victoriaLogs:
+  # Required, e.g. http://victoria-logs.logging.svc:9428
+  url: ""
+
+# Alert thresholds.
+alerts:
+  # Share of 5xx responses of the application route.
+  errorRatio: 0.05
+  # p95 of the upstream (application) response time, seconds.
+  p95LatencySeconds: 0.5
+  # Ignore error ratio and latency below this request rate (req/s), so a
+  # couple of requests in an idle cluster do not page anyone.
+  minRequestRate: 0.1
+
+scrapeInterval: 30s

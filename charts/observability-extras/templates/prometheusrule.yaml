@@ -1,0 +1,186 @@
+{{- $app := printf "envoy_cluster_name=~\"%s.*\"" .Values.envoyGateway.appClusterPrefix }}
+{{- $deployments := join "|" .Values.app.deployments }}
+{{- $a := .Values.alerts }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+spec:
+  groups:
+    # --- Demo application behind the Gateway ---
+    - name: demo-app
+      rules:
+        - alert: AppDown
+          expr: |
+            kube_deployment_status_replicas_available{namespace="{{ .Values.app.namespace }}", deployment=~"{{ $deployments }}"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ "{{ $labels.deployment }}" }} has no ready replicas"
+            description: >-
+              Deployment {{ "{{ $labels.namespace }}/{{ $labels.deployment }}" }} has had no available
+              replicas for 1 minute: the Gateway has nowhere to send its share of
+              the traffic. Check `kubectl -n {{ "{{ $labels.namespace }}" }} get pods` and the pod events.
+
+        - alert: High5xxRate
+          expr: |
+            (
+              (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[5m])) or vector(0))
+              /
+              sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m]))
+            ) > {{ $a.errorRatio }}
+            and
+            sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m])) > {{ $a.minRequestRate }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than {{ mulf $a.errorRatio 100 }}% of application responses are 5xx"
+            description: >-
+              {{ "{{ $value | humanizePercentage }}" }} of the requests to the application route
+              (Envoy clusters {{ .Values.envoyGateway.appClusterPrefix }}*) ended with a 5xx
+              response over the last 5 minutes. See the "Demo app — golden signals"
+              dashboard and the Angie error log in VictoriaLogs.
+
+        - alert: HighP95Latency
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{ {{- $app }}}[5m]))
+            ) > {{ mulf $a.p95LatencySeconds 1000 }}
+            and
+            sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m])) > {{ $a.minRequestRate }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Application p95 latency is above {{ $a.p95LatencySeconds }} s"
+            description: >-
+              95% of the requests to the application are answered within
+              {{ "{{ $value | printf \"%.0f\" }}" }} ms (Envoy upstream time, last 5 minutes); the
+              threshold is {{ mulf $a.p95LatencySeconds 1000 }} ms.
+
+    # --- Gateway API / Envoy ---
+    - name: gateway
+      rules:
+        - alert: GatewayNotProgrammed
+          expr: |
+            gatewayapi_gateway_status{namespace="{{ .Values.gateway.namespace }}", name="{{ .Values.gateway.name }}", type="Programmed"} != 1
+            or
+            absent(gatewayapi_gateway_status{namespace="{{ .Values.gateway.namespace }}", name="{{ .Values.gateway.name }}", type="Programmed"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gateway {{ .Values.gateway.namespace }}/{{ .Values.gateway.name }} is not Programmed"
+            description: >-
+              The Gateway's Programmed condition has not been True for 5 minutes (or the
+              Gateway is missing): Envoy Gateway could not configure the proxy or give it
+              an address. Check `kubectl -n {{ .Values.gateway.namespace }} describe gateway {{ .Values.gateway.name }}`
+              and the envoy-gateway controller logs.
+
+        - alert: GatewayProxyDown
+          expr: |
+            sum(up{job="envoy", namespace="{{ .Values.envoyGateway.namespace }}"}) == 0
+            or
+            absent(up{job="envoy", namespace="{{ .Values.envoyGateway.namespace }}"})
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No Envoy proxy of the Gateway is up"
+            description: >-
+              Prometheus cannot scrape any Envoy proxy in {{ .Values.envoyGateway.namespace }}
+              for 2 minutes: traffic to the cluster is most likely interrupted.
+
+    # --- Log collection ---
+    - name: logging
+      rules:
+        - alert: FluentdDown
+          expr: |
+            up{job="{{ .Values.logging.collectorJob }}"} == 0
+            or
+            absent(up{job="{{ .Values.logging.collectorJob }}"})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fluentd is down or not scraped"
+            description: >-
+              Fluentd ({{ "{{ $labels.pod }}" }}) has not been reachable for 5 minutes: container
+              logs of its node are not being shipped (they are read from the last
+              position once it is back).
+
+        - alert: FluentdNoOutput
+          expr: |
+            (sum by (pod) (rate(fluentd_input_status_num_records_total[5m])) > 0)
+            unless on (pod)
+            (sum by (pod) (rate(fluentd_output_status_write_count{plugin_id="out_victorialogs"}[5m])) > 0)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fluentd reads logs but sends nothing to VictoriaLogs"
+            description: >-
+              {{ "{{ $labels.pod }}" }} keeps reading container logs, but its VictoriaLogs output
+              has not written a single chunk for 10 minutes. Check VictoriaLogs and
+              `kubectl logs` of the Fluentd pod.
+
+        - alert: FluentdBufferErrors
+          expr: |
+            sum by (pod) (increase(fluentd_output_status_retry_count{plugin_id="out_victorialogs"}[10m])) > 0
+            or
+            sum by (pod) (increase(fluentd_output_status_num_errors{plugin_id="out_victorialogs"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fluentd retries sending logs to VictoriaLogs"
+            description: >-
+              {{ "{{ $labels.pod }}" }} failed to flush buffer chunks to VictoriaLogs
+              ({{ "{{ $value }}" }} retries or errors in 10 minutes). Logs are kept in the file
+              buffer and retried; if the buffer fills up, the oldest chunks are dropped.
+
+        - alert: FluentdBufferAlmostFull
+          expr: |
+            fluentd_output_status_buffer_available_space_ratio{plugin_id="out_victorialogs"} < 20
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Fluentd output buffer is almost full"
+            description: >-
+              Only {{ "{{ $value | printf \"%.0f\" }}" }}% of the VictoriaLogs output buffer of
+              {{ "{{ $labels.pod }}" }} is free; when it is full, the oldest logs are dropped.
+
+    # --- Control plane (kubeadm static pods) ---
+    - name: control-plane
+      rules:
+        - alert: ControlPlaneTargetDown
+          expr: |
+            up{job=~"apiserver|kube-controller-manager|kube-scheduler|etcd-metrics"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ "{{ $labels.job }}" }} metrics endpoint is down"
+            description: >-
+              Prometheus cannot scrape {{ "{{ $labels.job }}" }} at {{ "{{ $labels.instance }}" }} for
+              2 minutes: the component is down or its metrics endpoint refuses the
+              request (TLS or RBAC). Check `kubectl -n kube-system get pods`.
+
+        - alert: EtcdMetricsMissing
+          expr: |
+            absent(up{job="etcd-metrics"} == 1)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "etcd metrics are not collected"
+            description: >-
+              No successful scrape of etcd through kube-rbac-proxy (job etcd-metrics) for
+              5 minutes: etcd alerts and the etcd dashboard are blind. Check the
+              etcd-metrics-proxy DaemonSet.

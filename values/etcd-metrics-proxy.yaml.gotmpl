@@ -1,0 +1,7 @@
+image:
+  tag: {{ .Values.versions.KUBE_RBAC_PROXY_VERSION | quote }}
+
+nodeIP: {{ .Values.nodeIP | quote }}
+
+serviceMonitor:
+  enabled: {{ .Values.serviceMonitors }}

@@ -16,6 +16,9 @@ spec:
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
+  # Service label "version" (v1/v2) on every series: canary split by version.
+  targetLabels:
+    - version
   endpoints:
     - port: metrics
       path: /p8s

@@ -1,0 +1,64 @@
+---
+image:
+  repository: fluent/fluentd-kubernetes-daemonset
+  # Required; set from versions.env (FLUENTD_IMAGE_TAG) by helmfile. The
+  # "debian-forward" variant has every plugin the configuration uses.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Where the logs go: VictoriaLogs JSON lines API.
+victoriaLogs:
+  # Required, e.g. http://victoria-logs.logging.svc:9428
+  url: ""
+  # Log stream = one container of one pod.
+  streamFields:
+    - kubernetes.namespace_name
+    - kubernetes.pod_name
+    - kubernetes.container_name
+
+# Container log files of every pod on the node (symlinks into /var/log/pods).
+tailPath: /var/log/containers/*.log
+
+# Access logs written as JSON, parsed into fields. Patterns match the tag
+# kube.var.log.containers.<pod>_<namespace>_<container>-<id>.log
+jsonLogs:
+  # Angie access log (demo application).
+  - kube.var.log.containers.*_demo_angie-*.log
+  # Envoy access log (Gateway proxies).
+  - kube.var.log.containers.*_envoy-gateway-system_envoy-*.log
+
+# Angie/nginx error log lines ("2026/10/01 12:00:00 [error] 1#1: ..."): the
+# level is extracted into the "level" field.
+errorLogs:
+  - kube.var.log.containers.*_demo_angie-*.log
+
+# Output buffer on the node: survives Fluentd restarts and VictoriaLogs
+# outages (retried until it is back; the oldest chunks are dropped when full).
+buffer:
+  flushInterval: 2s
+  chunkLimitSize: 2m
+  totalLimitSize: 256m
+  retryMaxInterval: 30s
+
+# Host directory for tail positions and the output buffer.
+hostStateDir: /var/lib/fluentd
+
+metricsPort: 24231
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 384Mi
+
+# Collect logs on every node, control-plane included.
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+# Needs the Prometheus Operator CRDs.
+serviceMonitor:
+  enabled: false
+  interval: 30s

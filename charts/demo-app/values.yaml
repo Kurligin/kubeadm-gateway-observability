@@ -22,6 +22,9 @@ ports:
 service:
   port: 80
 
+# Nothing listens on this local port: /broken always fails with 502.
+brokenUpstreamPort: 9
+
 angie:
   workerProcesses: 1
   workerConnections: 1024

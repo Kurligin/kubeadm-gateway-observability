@@ -1,0 +1,104 @@
+{{- $tag := required "image.tag is required (FLUENTD_IMAGE_TAG in versions.env)" .Values.image.tag }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "logging.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "logging.labels" . | nindent 8 }}
+      annotations:
+        # Restart Fluentd when its configuration changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: fluentd
+      # Flush the buffer to disk on shutdown.
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      # Container log files are owned by root with mode 0640, so Fluentd runs
+      # as root. Everything else is locked down: no capabilities at all (root
+      # without CAP_DAC_OVERRIDE can only read files it owns, which is
+      # exactly the logs), no privilege escalation, read-only root filesystem,
+      # /var/log mounted read-only; the only writable host path is
+      # {{ .Values.hostStateDir }} (tail positions and buffer).
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fluentd
+          image: "{{ .Values.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Own configuration instead of the image's kubernetes.conf.
+            - name: FLUENTD_CONF
+              value: custom/fluent.conf
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /fluentd/etc/custom
+              readOnly: true
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: state
+              mountPath: {{ .Values.hostStateDir }}
+            # Ruby refuses a world-writable temporary directory without the
+            # sticky bit (an emptyDir is 0777), so /tmp is a root-owned
+            # sub-directory of the state directory.
+            - name: state
+              mountPath: /tmp
+              subPath: tmp
+      volumes:
+        - name: config
+          configMap:
+            name: fluentd
+        # /var/log/containers/*.log are symlinks into /var/log/pods.
+        - name: varlog
+          hostPath:
+            path: /var/log
+            type: Directory
+        - name: state
+          hostPath:
+            path: {{ .Values.hostStateDir }}
+            type: DirectoryOrCreate

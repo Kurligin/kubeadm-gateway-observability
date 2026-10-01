@@ -1,0 +1,8 @@
+image:
+  tag: {{ .Values.versions.FLUENTD_IMAGE_TAG | quote }}
+
+victoriaLogs:
+  url: {{ printf "http://%s.%s.svc:%v" .Values.logging.service .Values.logging.namespace .Values.logging.port | quote }}
+
+serviceMonitor:
+  enabled: {{ .Values.serviceMonitors }}

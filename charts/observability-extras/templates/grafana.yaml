@@ -1,0 +1,38 @@
+# Dashboards and datasources are loaded by the Grafana sidecars
+# (labels grafana_dashboard / grafana_datasource, any namespace).
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "dashboard-%s" (base $path | trimSuffix ".json") }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "observability-extras.labels" $ | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datasource-victorialogs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+data:
+  victorialogs.yaml: |-
+    apiVersion: 1
+    datasources:
+      # Plugin victoriametrics-logs-datasource (installed by Grafana on
+      # start-up, see values/kube-prometheus-stack.yaml.gotmpl).
+      - name: VictoriaLogs
+        type: victoriametrics-logs-datasource
+        uid: victorialogs
+        access: proxy
+        url: {{ required "victoriaLogs.url is required" .Values.victoriaLogs.url | quote }}
+        isDefault: false
+        editable: false

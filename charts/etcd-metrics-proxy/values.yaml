@@ -1,0 +1,35 @@
+---
+image:
+  repository: quay.io/brancz/kube-rbac-proxy
+  # Required; set from versions.env (KUBE_RBAC_PROXY_VERSION) by helmfile.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Node address (API server address of the kubeadm cluster); added to the
+# serving certificate so the endpoint can also be checked with curl by IP.
+nodeIP: ""
+
+# The proxy listens on <node IP>:<listenPort> (host network) and forwards
+# authorised requests to the etcd metrics endpoint kubeadm leaves on the
+# node's loopback (plain HTTP, never reachable from outside the node).
+listenPort: 2382
+upstream: http://127.0.0.1:2381/
+# Only the metrics path is proxied; anything else gets 404.
+allowPaths:
+  - /metrics
+
+# Serving certificate, issued by cert-manager.
+tls:
+  clusterIssuer: demo-ca
+
+resources:
+  requests:
+    cpu: 5m
+    memory: 16Mi
+  limits:
+    memory: 64Mi
+
+# Needs the Prometheus Operator CRDs.
+serviceMonitor:
+  enabled: false
+  interval: 30s

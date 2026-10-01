@@ -1,0 +1,6 @@
+---
+apiVersion: v2
+name: logging
+description: Fluentd DaemonSet - container logs (CRI) with Kubernetes metadata to VictoriaLogs over HTTP
+type: application
+version: 0.1.0

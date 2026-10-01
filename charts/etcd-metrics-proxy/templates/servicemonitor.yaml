@@ -1,0 +1,36 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Job "etcd-metrics": matches the etcd rules and dashboard of
+# kube-prometheus-stack (job=~".*etcd.*").
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "etcd-metrics-proxy.serviceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "etcd-metrics-proxy.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: https-metrics
+      path: /metrics
+      scheme: https
+      interval: {{ .Values.serviceMonitor.interval }}
+      # Server certificate verified against the cluster demo CA, by DNS name
+      # (the scrape address is the node IP).
+      tlsConfig:
+        serverName: {{ include "etcd-metrics-proxy.serverName" . }}
+        ca:
+          secret:
+            name: {{ include "etcd-metrics-proxy.tlsSecret" . }}
+            key: ca.crt
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "etcd-metrics-proxy.scraper" . }}-token
+          key: token
+{{- end }}

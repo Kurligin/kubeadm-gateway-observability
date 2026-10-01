@@ -1,0 +1,34 @@
+# kubernetes_metadata filter: reads pods and namespaces (cached, watched).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ printf "%s-fluentd" .Release.Name }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-fluentd" .Release.Name }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "%s-fluentd" .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: fluentd
+    namespace: {{ .Release.Namespace }}

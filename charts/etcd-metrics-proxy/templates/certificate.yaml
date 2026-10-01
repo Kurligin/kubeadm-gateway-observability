@@ -1,0 +1,24 @@
+{{- $nodeIP := required "nodeIP is required" .Values.nodeIP }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "etcd-metrics-proxy.tlsSecret" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "etcd-metrics-proxy.tlsSecret" . }}
+  commonName: {{ include "etcd-metrics-proxy.serverName" . | quote }}
+  dnsNames:
+    - {{ include "etcd-metrics-proxy.serverName" . | quote }}
+  ipAddresses:
+    - {{ $nodeIP | quote }}
+  usages:
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: {{ .Values.tls.clusterIssuer }}

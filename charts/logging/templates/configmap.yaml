@@ -1,0 +1,207 @@
+{{- $url := required "victoriaLogs.url is required" .Values.victoriaLogs.url | trimSuffix "/" }}
+{{- $headers := dict "VL-Msg-Field" "message" "VL-Time-Field" "date" "VL-Stream-Fields" (join "," .Values.victoriaLogs.streamFields) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+data:
+  fluent.conf: |
+    # Pipeline:
+    #   tail (CRI format) -> @CONCAT: join partial lines -> @PROCESS:
+    #   Kubernetes metadata, JSON access logs and error log levels into
+    #   fields -> out_http (file buffer) -> VictoriaLogs /insert/jsonline
+
+    <system>
+      log_level info
+    </system>
+
+    # Fluentd's own log stays on its stdout; its container is excluded from
+    # tailing below, so its log lines never loop back into the pipeline.
+    <label @FLUENT_LOG>
+      <match **>
+        @type null
+      </match>
+    </label>
+
+    # --- Own metrics: http://<pod>:{{ .Values.metricsPort }}/metrics ---
+    <source>
+      @type prometheus
+      @id in_prometheus
+      bind 0.0.0.0
+      port {{ .Values.metricsPort }}
+      metrics_path /metrics
+    </source>
+
+    # Buffer, retry and error counters of every output plugin.
+    <source>
+      @type prometheus_output_monitor
+      @id in_prometheus_output_monitor
+      interval 10
+    </source>
+
+    # Read position of every tailed file.
+    <source>
+      @type prometheus_tail_monitor
+      @id in_prometheus_tail_monitor
+    </source>
+
+    # --- Input: container logs written by containerd (CRI format) ---
+    # "<time> <stdout|stderr> <P|F> <message>"; the tag carries the file name
+    # kube.var.log.containers.<pod>_<namespace>_<container>-<id>.log
+    <source>
+      @type tail
+      @id in_tail_containers
+      @label @CONCAT
+      path {{ .Values.tailPath }}
+      exclude_path ["/var/log/containers/fluentd-*_{{ .Release.Namespace }}_fluentd-*.log"]
+      pos_file {{ .Values.hostStateDir }}/containers.log.pos
+      pos_file_compaction_interval 1h
+      tag kube.*
+      read_from_head true
+      follow_inodes true
+      refresh_interval 5
+      rotate_wait 5
+      <parse>
+        @type cri
+        # The CRI timestamp becomes the event time, not an extra field.
+        keep_time_key false
+      </parse>
+    </source>
+
+    <label @CONCAT>
+      # concat drops its stream key from the joined record; give it a copy,
+      # so "stream" (stdout/stderr) stays in the record.
+      <filter kube.**>
+        @type record_transformer
+        <record>
+          cri_stream ${record["stream"]}
+        </record>
+      </filter>
+
+      # containerd splits lines longer than 16 KiB into "P" (partial) parts
+      # ending with an "F" (full) part; join them back into one record.
+      <filter kube.**>
+        @type concat
+        key message
+        use_partial_cri_logtag true
+        partial_cri_logtag_key logtag
+        partial_cri_stream_key cri_stream
+        separator ""
+        flush_interval 5
+        # An unfinished sequence is flushed as is after flush_interval.
+        timeout_label @PROCESS
+      </filter>
+
+      <match kube.**>
+        @type relabel
+        @label @PROCESS
+      </match>
+    </label>
+
+    <label @PROCESS>
+      # namespace, pod, container, image, node and pod labels from the API
+      # server (cached, watched) into the "kubernetes" field.
+      <filter kube.**>
+        @type kubernetes_metadata
+        @id filter_kubernetes_metadata
+        skip_master_url true
+        # No namespace labels/UID on every line.
+        skip_namespace_metadata true
+      </filter>
+
+      # JSON access logs (Angie, Envoy): every key becomes a field
+      # (status, uri, x_request_id, ...). The original line stays in
+      # "message" and the event time stays the CRI timestamp; other lines
+      # (not JSON) pass through unchanged.
+      <filter {{ join " " .Values.jsonLogs }}>
+        @type parser
+        key_name message
+        reserve_data true
+        reserve_time true
+        emit_invalid_record_to_error false
+        <parse>
+          @type json
+          time_type string
+          keep_time_key true
+        </parse>
+      </filter>
+
+      # Error log lines: "2026/10/01 12:00:00 [error] 1#1: ..." -> level.
+      <filter {{ join " " .Values.errorLogs }}>
+        @type parser
+        key_name message
+        reserve_data true
+        reserve_time true
+        emit_invalid_record_to_error false
+        <parse>
+          @type regexp
+          expression /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} \[(?<level>[a-z]+)\] /
+        </parse>
+      </filter>
+
+      # access (stdout) vs error (stderr) log of the application.
+      <filter {{ join " " .Values.errorLogs }}>
+        @type record_transformer
+        enable_ruby true
+        <record>
+          log_type ${record["stream"] == "stderr" ? "error" : "access"}
+        </record>
+      </filter>
+
+      # Incoming records per namespace (fluentd_input_status_num_records_total).
+      <filter kube.**>
+        @type prometheus
+        <metric>
+          name fluentd_input_status_num_records_total
+          type counter
+          desc Records read from container logs
+          <labels>
+            namespace $.kubernetes.namespace_name
+          </labels>
+        </metric>
+      </filter>
+
+      # Event time (CRI timestamp, nanoseconds) as a field: out_http sends
+      # only the record, VictoriaLogs takes _time from "date".
+      <filter kube.**>
+        @type record_transformer
+        enable_ruby true
+        <record>
+          date ${time.to_time.utc.iso8601(9)}
+        </record>
+      </filter>
+
+      # --- Output: VictoriaLogs JSON lines API (core out_http plugin) ---
+      <match kube.**>
+        @type http
+        @id out_victorialogs
+        endpoint {{ $url }}/insert/jsonline
+        # _msg = "message", _time = "date", one stream per container.
+        headers {{ $headers | toJson }}
+        content_type application/x-ndjson
+        open_timeout 5
+        read_timeout 15
+        # Anything else (4xx) means the batch itself is bad: not retried.
+        retryable_response_codes [429, 500, 502, 503, 504]
+        <format>
+          @type json
+        </format>
+        <buffer>
+          @type file
+          path {{ .Values.hostStateDir }}/buffer/victorialogs
+          flush_mode interval
+          flush_interval {{ .Values.buffer.flushInterval }}
+          flush_at_shutdown true
+          chunk_limit_size {{ .Values.buffer.chunkLimitSize }}
+          total_limit_size {{ .Values.buffer.totalLimitSize }}
+          overflow_action drop_oldest_chunk
+          retry_type exponential_backoff
+          retry_wait 1s
+          retry_max_interval {{ .Values.buffer.retryMaxInterval }}
+          retry_forever true
+        </buffer>
+      </match>
+    </label>

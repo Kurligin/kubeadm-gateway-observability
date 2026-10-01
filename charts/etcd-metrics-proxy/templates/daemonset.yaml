@@ -1,0 +1,80 @@
+{{- $tag := required "image.tag is required (KUBE_RBAC_PROXY_VERSION in versions.env)" .Values.image.tag }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "etcd-metrics-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "etcd-metrics-proxy.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Chart.Name }}
+      # etcd runs on control-plane nodes and serves metrics on their
+      # loopback, which is reachable only from the host network.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kube-rbac-proxy
+          image: "{{ .Values.image.repository }}:v{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --secure-listen-address=$(NODE_IP):{{ .Values.listenPort }}
+            - --upstream={{ .Values.upstream }}
+            - --allow-paths={{ join "," .Values.allowPaths }}
+            - --tls-cert-file=/etc/kube-rbac-proxy/tls/tls.crt
+            - --tls-private-key-file=/etc/kube-rbac-proxy/tls/tls.key
+            - --tls-min-version=VersionTLS12
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: https-metrics
+              containerPort: {{ .Values.listenPort }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: https-metrics
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: https-metrics
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/kube-rbac-proxy/tls
+              readOnly: true
+      volumes:
+        # Renewed by cert-manager; the proxy reloads the files.
+        - name: tls
+          secret:
+            secretName: {{ include "etcd-metrics-proxy.tlsSecret" . }}

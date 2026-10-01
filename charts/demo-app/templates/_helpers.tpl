@@ -57,11 +57,19 @@ http {
 
     keepalive_timeout 65;
 
+    # Request counters are kept per key: kubelet probes ("probes") apart
+    # from application traffic ("app"), see status_zone below.
+    map $uri $status_zone_key {
+        /healthz probes;
+        default  app;
+    }
+
     server {
         listen {{ .root.Values.ports.http }} default_server;
         server_name _;
-        # Request and response counters for /p8s (http server zone "app").
-        status_zone app;
+        # Request and response counters for /p8s: http server zones "app"
+        # (application traffic) and "probes" (kubelet health checks).
+        status_zone $status_zone_key zone=server:2;
 
         location = /healthz {
             access_log off;
@@ -70,6 +78,13 @@ http {
 
         location / {
             return 200 "Hello World! version={{ .item.version }} pod=$hostname\n";
+        }
+
+        # Failure on demand, for checking error logs and 5xx alerting: the
+        # upstream is unreachable, so Angie answers 502 and writes an
+        # "[error] ... connect() failed" line to its error log (stderr).
+        location = /broken {
+            proxy_pass http://127.0.0.1:{{ .root.Values.brokenUpstreamPort }};
         }
     }
 

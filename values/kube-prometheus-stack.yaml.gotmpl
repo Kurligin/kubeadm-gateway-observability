@@ -1,0 +1,228 @@
+# Prometheus, Alertmanager, Grafana, node-exporter and kube-state-metrics,
+# sized for a single node with 4-8 GB of RAM.
+
+# The Prometheus Operator CRDs are a separate release
+# (prometheus-operator-crds), installed before everything else.
+crds:
+  enabled: false
+
+defaultRules:
+  rules:
+    # No kube-proxy (Cilium replaces it) and no Windows nodes.
+    kubeProxy: false
+    windows: false
+
+# --- Prometheus Operator ---
+prometheusOperator:
+  # No validating/mutating webhooks: they need an extra certificate job on
+  # every upgrade and can race with the first install. PrometheusRules are
+  # checked by `promtool check rules` in `make lint` instead.
+  admissionWebhooks:
+    enabled: false
+  # Operator's own HTTPS listener uses the webhook certificate.
+  tls:
+    enabled: false
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      memory: 192Mi
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 64Mi
+
+# --- Prometheus ---
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # Three days of metrics, capped in size so the node disk never fills up.
+    retention: 3d
+    retentionSize: 6GB
+    # UI is published through the Gateway (basic auth).
+    externalUrl: {{ printf "https://prometheus.%s" .Values.domain | quote }}
+    # Pick up ServiceMonitors, PodMonitors, Probes and PrometheusRules from
+    # every namespace, not only those labelled for this Helm release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 384Mi
+      limits:
+        memory: 1536Mi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 8Gi
+
+# --- Alertmanager ---
+# One replica, no external receivers: alerts are visible in the
+# Alertmanager and Prometheus APIs and in Grafana.
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    retention: 24h
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+
+# --- Grafana ---
+grafana:
+  # Admin credentials come from a Secret created on the first deploy by
+  # scripts/ensure-grafana-admin.sh (random password, never in git).
+  admin:
+    existingSecret: {{ .Values.grafana.adminSecret | quote }}
+    userKey: admin-user
+    passwordKey: admin-password
+  # Stateless: dashboards and datasources are provisioned from ConfigMaps.
+  persistence:
+    enabled: false
+  defaultDashboardsTimezone: browser
+  grafana.ini:
+    server:
+      root_url: {{ printf "https://grafana.%s" .Values.domain | quote }}
+    analytics:
+      check_for_updates: false
+      check_for_plugin_updates: false
+      reporting_enabled: false
+    users:
+      allow_sign_up: false
+    auth.anonymous:
+      enabled: false
+    plugins:
+      # Installed in the background on start-up: if grafana.com is not
+      # reachable, Grafana still starts (only the VictoriaLogs datasource
+      # stays unavailable; logs remain visible in vmui).
+      preinstall: {{ printf "victoriametrics-logs-datasource@%s" .Values.versions.GRAFANA_VICTORIALOGS_PLUGIN_VERSION | quote }}
+      preinstall_async: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+  sidecar:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 48Mi
+      limits:
+        memory: 128Mi
+    dashboards:
+      # Dashboards with this label in any namespace (observability-extras).
+      searchNamespace: ALL
+    datasources:
+      searchNamespace: ALL
+
+# --- Control plane ---
+# kubeadm static pods; the node address is the API server address.
+# controller-manager and scheduler listen on the node IP (kubeadm config) and
+# serve HTTPS with a certificate they generate for themselves at start-up
+# (not signed by the cluster CA), so the server certificate cannot be
+# verified. The request still carries Prometheus' ServiceAccount token, which
+# the components authenticate and authorise through the API server.
+kubeControllerManager:
+  endpoints:
+    - {{ .Values.nodeIP | quote }}
+  service:
+    port: 10257
+    targetPort: 10257
+  serviceMonitor:
+    https: true
+    tlsConfig:
+      insecureSkipVerify: true
+
+kubeScheduler:
+  endpoints:
+    - {{ .Values.nodeIP | quote }}
+  service:
+    port: 10259
+    targetPort: 10259
+  serviceMonitor:
+    https: true
+    tlsConfig:
+      insecureSkipVerify: true
+
+# etcd metrics stay on 127.0.0.1:2381; they are published through
+# kube-rbac-proxy (chart etcd-metrics-proxy), which brings its own Service
+# and ServiceMonitor. Enabled here only for the etcd alerting rules and
+# dashboard.
+kubeEtcd:
+  enabled: true
+  service:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+
+# Not deployed: Cilium replaces kube-proxy.
+kubeProxy:
+  enabled: false
+
+# --- kube-state-metrics ---
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 192Mi
+  # Gateway API objects as metrics: status conditions of every Gateway
+  # (gatewayapi_gateway_status{type="Programmed"}), used by the
+  # GatewayNotProgrammed alert.
+  rbac:
+    extraRules:
+      - apiGroups: ["gateway.networking.k8s.io"]
+        resources: ["gateways"]
+        verbs: ["list", "watch"]
+  customResourceState:
+    enabled: true
+    config:
+      kind: CustomResourceStateMetrics
+      spec:
+        resources:
+          - groupVersionKind:
+              group: gateway.networking.k8s.io
+              version: v1
+              kind: Gateway
+            metricNamePrefix: gatewayapi_gateway
+            labelsFromPath:
+              name: [metadata, name]
+              namespace: [metadata, namespace]
+            metrics:
+              - name: status
+                help: "Gateway status condition (1 = True, 0 = False)"
+                each:
+                  type: Gauge
+                  gauge:
+                    path: [status, conditions]
+                    labelsFromPath:
+                      type: [type]
+                    valueFrom: [status]
+
+# --- node-exporter ---
+# Needs the host network and PID namespace: lives in its own namespace with
+# Pod Security "privileged", so "monitoring" itself can stay "restricted".
+prometheus-node-exporter:
+  namespaceOverride: {{ .Values.monitoring.nodeNamespace | quote }}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      memory: 64Mi

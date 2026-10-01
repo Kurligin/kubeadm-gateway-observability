@@ -5,3 +5,23 @@ gateway:
 
 basicAuth:
   secretName: {{ .Values.basicAuth.secretName | quote }}
+
+# Observability UIs, https://<host>.<domain>. Grafana has its own login
+# (admin password in a Secret, see `make status`); Prometheus and vmui have
+# no authentication of their own, so the Gateway asks for basic auth.
+uiRoutes:
+  - host: grafana
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    service: kube-prometheus-stack-grafana
+    port: 80
+    basicAuth: false
+  - host: prometheus
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    service: kube-prometheus-stack-prometheus
+    port: 9090
+    basicAuth: true
+  - host: logs
+    namespace: {{ .Values.logging.namespace | quote }}
+    service: {{ .Values.logging.service | quote }}
+    port: {{ .Values.logging.port }}
+    basicAuth: true

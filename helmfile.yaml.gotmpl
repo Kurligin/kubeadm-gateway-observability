@@ -32,9 +32,9 @@ environments:
       - nodeIP: {{ $nodeIP | quote }}
         versions:
 {{ $versions | toYaml | indent 10 }}
-        # Prometheus Operator CRDs are installed together with
-        # kube-prometheus-stack; ServiceMonitors stay off until then.
-        serviceMonitors: false
+        # ServiceMonitors/PodMonitors of every chart. The Prometheus Operator
+        # CRDs are the very first release, so this can be on from the start.
+        serviceMonitors: true
         # Demo domain served by the Gateway (certificate: <domain>, *.<domain>).
         domain: demo.local
         # Gateway "public" and its routes live in this namespace.
@@ -46,6 +46,23 @@ environments:
         basicAuth:
           secretName: {{ $versions.BASIC_AUTH_SECRET | quote }}
           username: {{ $versions.BASIC_AUTH_USER | quote }}
+        # Prometheus, Alertmanager, Grafana and kube-state-metrics live in
+        # "namespace"; host-level agents (node-exporter, etcd metrics proxy)
+        # in "nodeNamespace" (Pod Security "privileged").
+        monitoring:
+          namespace: {{ $versions.MONITORING_NAMESPACE | quote }}
+          nodeNamespace: {{ printf "%s-node" $versions.MONITORING_NAMESPACE | quote }}
+        # VictoriaLogs in "namespace", Fluentd in "nodeNamespace".
+        logging:
+          namespace: {{ $versions.LOGGING_NAMESPACE | quote }}
+          nodeNamespace: {{ printf "%s-node" $versions.LOGGING_NAMESPACE | quote }}
+          # VictoriaLogs Service (fullnameOverride) and its HTTP port.
+          service: victoria-logs
+          port: 9428
+        # Grafana admin credentials (Secret in the monitoring namespace).
+        grafana:
+          adminSecret: {{ $versions.GRAFANA_ADMIN_SECRET | quote }}
+          adminUser: {{ $versions.GRAFANA_ADMIN_USER | quote }}
 
 ---
 helmDefaults:
@@ -60,12 +77,29 @@ repositories:
     url: https://helm.cilium.io
   - name: jetstack
     url: https://charts.jetstack.io
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: vm
+    url: https://victoriametrics.github.io/helm-charts
 
 releases:
+  # Prometheus Operator CRDs (ServiceMonitor, PodMonitor, PrometheusRule, ...)
+  # first: almost every chart below ships a ServiceMonitor, Cilium included.
+  # CRDs need no running pods, so this works before the CNI is up. As a
+  # regular release (CRDs in templates/), they are upgraded with the chart.
+  - name: prometheus-operator-crds
+    namespace: kube-system
+    chart: prometheus-community/prometheus-operator-crds
+    version: {{ .Values.versions.PROMETHEUS_OPERATOR_CRDS_VERSION | quote }}
+
   - name: cilium
     namespace: kube-system
     chart: cilium/cilium
     version: {{ .Values.versions.CILIUM_VERSION | quote }}
+    # Ships ServiceMonitors: the first diff runs before any CRD exists.
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/prometheus-operator-crds
     values:
       - values/cilium.yaml.gotmpl
 
@@ -96,6 +130,7 @@ releases:
     namespace: cert-manager
     chart: jetstack/cert-manager
     version: {{ printf "v%s" .Values.versions.CERT_MANAGER_VERSION | quote }}
+    disableValidationOnInstall: true
     needs:
       - kube-system/cilium
     values:
@@ -133,10 +168,111 @@ releases:
           - {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
           - values/envoy-gateway-crds.yaml
 
+  # Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics.
+  # Prometheus needs a PVC; kube-state-metrics exports Gateway API objects,
+  # so their CRDs (envoy-gateway presync hook) come first. Uses Prometheus
+  # Operator CRDs, so the first diff runs without cluster validation (same
+  # for every release below that ships a ServiceMonitor or rules).
+  - name: kube-prometheus-stack
+    namespace: {{ .Values.monitoring.namespace }}
+    chart: prometheus-community/kube-prometheus-stack
+    version: {{ .Values.versions.KUBE_PROMETHEUS_STACK_VERSION | quote }}
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - local-path-storage/local-path-provisioner
+      - envoy-gateway-system/envoy-gateway
+    values:
+      - values/kube-prometheus-stack.yaml.gotmpl
+    hooks:
+      # Grafana admin Secret before the first install (Grafana reads it via
+      # admin.existingSecret); `make platform` re-checks it after every apply.
+      - events: ["presync"]
+        showlogs: true
+        command: ./scripts/ensure-grafana-admin.sh
+        args:
+          - {{ .Values.monitoring.namespace | quote }}
+          - {{ .Values.grafana.adminSecret | quote }}
+          - {{ .Values.grafana.adminUser | quote }}
+
+  # kube-rbac-proxy for etcd metrics: TLS certificate from the demo CA.
+  - name: etcd-metrics-proxy
+    namespace: {{ .Values.monitoring.nodeNamespace }}
+    chart: ./charts/etcd-metrics-proxy
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - cert-manager/pki
+    values:
+      - values/etcd-metrics-proxy.yaml.gotmpl
+    hooks:
+      # See the "logging" release: wait for the DaemonSet rollout.
+      - events: ["postsync"]
+        showlogs: true
+        command: kubectl
+        args:
+          - {{ printf "--namespace=%s" .Values.monitoring.nodeNamespace | quote }}
+          - rollout
+          - status
+          - --timeout=300s
+          - daemonset/etcd-metrics-proxy
+
+  # Log storage with LogsQL API and web UI.
+  - name: victoria-logs
+    namespace: {{ .Values.logging.namespace }}
+    chart: vm/victoria-logs-single
+    version: {{ .Values.versions.VICTORIA_LOGS_CHART_VERSION | quote }}
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - local-path-storage/local-path-provisioner
+    values:
+      - values/victoria-logs.yaml.gotmpl
+
+  # Fluentd DaemonSet: container logs -> VictoriaLogs.
+  - name: logging
+    namespace: {{ .Values.logging.nodeNamespace }}
+    chart: ./charts/logging
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - {{ printf "%s/victoria-logs" .Values.logging.namespace }}
+    values:
+      - values/logging.yaml.gotmpl
+    hooks:
+      # Helm's --wait accepts a DaemonSet on a single node with zero ready
+      # pods (maxUnavailable 1); wait for the rollout explicitly.
+      - events: ["postsync"]
+        showlogs: true
+        command: kubectl
+        args:
+          - {{ printf "--namespace=%s" .Values.logging.nodeNamespace | quote }}
+          - rollout
+          - status
+          - --timeout=300s
+          - daemonset/fluentd
+
+  # Envoy scrape targets, alerting rules, dashboards, VictoriaLogs datasource.
+  # Needs only the CRDs and namespaces, so it is installed before Prometheus
+  # starts and is part of its very first configuration (a later change
+  # reaches Prometheus only after the kubelet refreshes the mounted config
+  # Secret, which can take minutes). Grafana sidecars pick up the dashboard
+  # and datasource ConfigMaps whenever they appear.
+  - name: observability-extras
+    namespace: {{ .Values.monitoring.namespace }}
+    chart: ./charts/observability-extras
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - kube-system/prometheus-operator-crds
+    values:
+      - values/observability-extras.yaml.gotmpl
+
   # Angie web-v1 / web-v2 behind the Gateway.
   - name: demo-app
     namespace: demo
     chart: ./charts/demo-app
+    disableValidationOnInstall: true
     needs:
       - kube-system/namespaces
     values:
@@ -152,6 +288,9 @@ releases:
       - cert-manager/pki
       - envoy-gateway-system/envoy-gateway
       - demo/demo-app
+      # UI routes (uiRoutes) point to their Services.
+      - {{ printf "%s/kube-prometheus-stack" .Values.monitoring.namespace }}
+      - {{ printf "%s/victoria-logs" .Values.logging.namespace }}
     values:
       - values/gateway.yaml.gotmpl
     hooks:

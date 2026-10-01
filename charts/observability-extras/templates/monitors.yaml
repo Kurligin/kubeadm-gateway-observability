@@ -1,0 +1,48 @@
+# Envoy proxies deployed by Envoy Gateway: admin listener
+# :19001/stats/prometheus (enabled in the EnvoyProxy of the gateway chart).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: envoy-proxy
+  namespace: {{ .Values.envoyGateway.namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/managed-by: envoy-gateway
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.envoyGateway.namespace }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /stats/prometheus
+      interval: {{ .Values.scrapeInterval }}
+      relabelings:
+        # Which Gateway the proxy serves.
+        - sourceLabels: [__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_namespace]
+          targetLabel: gateway_namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name]
+          targetLabel: gateway
+---
+# Envoy Gateway controller (xDS, status updates, reconcile metrics).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: envoy-gateway
+  namespace: {{ .Values.envoyGateway.namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      control-plane: envoy-gateway
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.envoyGateway.namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.scrapeInterval }}

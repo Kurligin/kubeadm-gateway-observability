@@ -1,6 +1,10 @@
 # Pod Security Standards version follows the Kubernetes minor version.
 podSecurityVersion: {{ .Values.versions.K8S_MINOR | quote }}
 
+# Every namespace gets the strictest level its pods can live with. Agents
+# that need the host (host network/PID, hostPath) are kept in separate
+# "-node" namespaces, so the rest of monitoring and logging stays
+# "restricted".
 namespaces:
   - name: demo
     podSecurity: restricted
@@ -11,3 +15,21 @@ namespaces:
   # as non-root with dropped capabilities and seccomp RuntimeDefault.
   - name: envoy-gateway-system
     podSecurity: restricted
+  # Prometheus, Alertmanager, Grafana, Prometheus Operator,
+  # kube-state-metrics: non-root, read-only root filesystem, no capabilities.
+  - name: {{ .Values.monitoring.namespace }}
+    podSecurity: restricted
+  # node-exporter (host network, host PID, read-only hostPath /, /proc, /sys)
+  # and the etcd metrics proxy (host network: etcd metrics listen on the
+  # node's loopback). "baseline" forbids both, hence "privileged"; the pods
+  # themselves still run without privileged mode or extra capabilities.
+  - name: {{ .Values.monitoring.nodeNamespace }}
+    podSecurity: privileged
+  # VictoriaLogs: non-root, read-only root filesystem, no capabilities.
+  - name: {{ .Values.logging.namespace }}
+    podSecurity: restricted
+  # Fluentd reads container logs from the node (hostPath /var/log, position
+  # files on hostPath), which "baseline" forbids; it runs as root because
+  # the log files are root-owned (0640), but with all capabilities dropped.
+  - name: {{ .Values.logging.nodeNamespace }}
+    podSecurity: privileged

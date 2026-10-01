@@ -1,0 +1,73 @@
+# The proxy itself: authenticates bearer tokens (TokenReview) and checks
+# permissions (SubjectAccessReview) through the API server.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-auth-delegator" .Chart.Name }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Chart.Name }}
+    namespace: {{ .Release.Namespace }}
+---
+# Identity Prometheus uses for this endpoint only: its token can do nothing
+# but "get /metrics". It lives next to the proxy, so the ServiceMonitor can
+# reference both this token and the CA of the serving certificate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "etcd-metrics-proxy.scraper" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "etcd-metrics-proxy.scraper" . }}-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: {{ include "etcd-metrics-proxy.scraper" . }}
+# The token is filled in by the API server's token controller.
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ printf "%s-reader" .Chart.Name }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-reader" .Chart.Name }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "%s-reader" .Chart.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "etcd-metrics-proxy.scraper" . }}
+    namespace: {{ .Release.Namespace }}

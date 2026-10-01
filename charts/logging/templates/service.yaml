@@ -1,0 +1,17 @@
+# Metrics endpoint of every Fluentd pod (fluent-plugin-prometheus).
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logging.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "logging.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metricsPort }}
+      targetPort: metrics
+      protocol: TCP

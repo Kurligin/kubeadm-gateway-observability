@@ -1,0 +1,9 @@
+envoyGateway:
+  appClusterPrefix: {{ printf "httproute/%s/app/" .Values.gateway.namespace | quote }}
+
+gateway:
+  namespace: {{ .Values.gateway.namespace | quote }}
+  name: {{ .Values.gateway.name | quote }}
+
+victoriaLogs:
+  url: {{ printf "http://%s.%s.svc:%v" .Values.logging.service .Values.logging.namespace .Values.logging.port | quote }}

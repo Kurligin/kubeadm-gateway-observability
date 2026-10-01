@@ -1,0 +1,18 @@
+# Headless: the endpoints are the proxy pods, i.e. the control-plane node
+# addresses (host network).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "etcd-metrics-proxy.serviceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "etcd-metrics-proxy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https-metrics
+      port: {{ .Values.listenPort }}
+      targetPort: https-metrics
+      protocol: TCP
