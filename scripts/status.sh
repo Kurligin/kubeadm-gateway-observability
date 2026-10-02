@@ -34,11 +34,22 @@ main() {
     "Kubernetes \(.status.nodeInfo.kubeletVersion), \(.status.nodeInfo.containerRuntimeVersion), \(.status.nodeInfo.osImage)"'
 
   section "Gateway"
-  local gw ip programmed
+  local gw ip addresses server programmed
   gw="$(kubectl -n "${GATEWAY_NAMESPACE}" get gateway "${GATEWAY_NAME}" -o json 2>/dev/null || echo '{}')"
-  ip="$(jq -r '.status.addresses[0].value // empty' <<<"${gw}")"
+  # With workers the Gateway has an address on every node; the control
+  # plane's (the API server address) is shown first and used below.
+  addresses="$(jq -r '.status.addresses[]?.value' <<<"${gw}")"
+  server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  server=${server#https://}
+  server=${server%:*}
+  if grep -qxF "${server}" <<<"${addresses}"; then
+    ip=${server}
+  else
+    ip="$(head -n1 <<<"${addresses}")"
+  fi
+  addresses="$({ printf '%s\n' "${ip}"; grep -vxF "${ip}" <<<"${addresses}" || true; } | xargs)"
   programmed="$(jq -r '[.status.conditions[]? | select(.type == "Programmed")][0].status // "unknown"' <<<"${gw}")"
-  printf '  %s/%s  address %s  Programmed=%s\n' "${GATEWAY_NAMESPACE}" "${GATEWAY_NAME}" "${ip:-none}" "${programmed}"
+  printf '  %s/%s  address %s  Programmed=%s\n' "${GATEWAY_NAMESPACE}" "${GATEWAY_NAME}" "${addresses:-none}" "${programmed}"
 
   section "Addresses (HTTPS, certificate of the demo CA)"
   local host

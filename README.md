@@ -256,6 +256,8 @@ VirtualBox у нас не было.
 | `make ui` | адреса UI (Grafana, Prometheus, Alertmanager, vmui) и пароли к ним |
 | `make ca` | выгрузить корневой сертификат CA в `ca.crt` (для `curl --cacert`) |
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
+| `make add-worker WORKER=<адрес>` | присоединить воркер по SSH (см. «Несколько узлов») |
+| `make remove-worker WORKER=<адрес>` | вывести воркер: drain, сброс узла, удаление из кластера |
 | `make images` | после `make cluster`: скачать в containerd все образы из `images.txt` (по digest) и образы control plane kubeadm; уже скачанные пропускаются |
 | `make images-list` | пересобрать `images.txt` из отрендеренных манифестов (после смены версий в `versions.env`) |
 | `make lint-deps && make lint` | только Ubuntu amd64 (на macOS и других ОС — внутри ВМ `vagrant up`), без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален; kubeconform, trivy config и kube-linter по отрендеренным манифестам (см. «CI/CD») |
@@ -269,7 +271,7 @@ make verify        # на узле: адрес, CA и пароль берутс�
 ```
 
 Скрипт `scripts/verify.sh` проходит те же 8 шагов, что описаны ниже для
-ручной проверки, и печатает строку на каждую проверку: `✓` — прошла, `✗` —
+ручной проверки (и шаг 9, если в кластере есть воркеры), и печатает строку на каждую проверку: `✓` — прошла, `✗` —
 нет (с причиной), `-` — пропущена (с причиной). В конце — итог и код
 возврата: `0`, если провалов нет, иначе `1`. Сразу после деплоя не всё
 готово мгновенно (цели Prometheus появляются через 1–2 интервала сбора),
@@ -286,6 +288,7 @@ make verify        # на узле: адрес, CA и пароль берутс�
 | 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API); поддельный `X-Gateway-Route` клиента до Angie не дошёл (заменён фильтром маршрута); копия этого же запроса (зеркало) пришла в web-v2 на теневой порт (`traffic: shadow`) |
 | 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A` (metrics-server); алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
 | 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway не проходят (404); etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для локальной сети (проверяется только с другой машины) |
+| 9 | только при нескольких узлах (на одном — одна строка «пропущено»): поды всех DaemonSet готовы на каждом узле (Cilium, Fluentd, node-exporter — на всех); Envoy и web-v1/web-v2 работают больше чем на одном узле; Gateway отвечает 200 по адресу каждого узла; `kubectl logs` пода на воркере и `kubectl top` воркера; логи подов воркера есть в VictoriaLogs; node-exporter и kubelet каждого узла `up` в Prometheus |
 
 Повторный запуск в течение минуты корректен: rate limit `/limited`
 считается поминутно, и если лимит ещё исчерпан прошлым запуском, все 25
@@ -714,6 +717,114 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 # curl: (28) Connection timed out — пакеты отброшены политикой
 ```
 
+## Несколько узлов
+
+По умолчанию кластер одноузловой, и всё выше относится к нему. К нему можно
+добавить воркеры: теми же ролями Ansible (`node_prep`, `node_firewall`,
+`containerd`, `kube_packages`) узел готовится, затем присоединяется
+`kubeadm join`. Команда запускается на control plane после `./deploy.sh`:
+
+```bash
+# на control plane; воркер — Ubuntu 24.04 amd64, доступ по SSH, sudo без пароля
+make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
+kubectl get nodes -o wide
+make verify                    # шаг 9 проверяет каждый узел
+
+make remove-worker WORKER=192.0.2.21   # вывести воркер обратно
+```
+
+Ключ воркера должен быть в `~/.ssh/authorized_keys` пользователя на воркере,
+а его host key — известен (один раз `ssh ubuntu@192.0.2.21`). Несколько
+воркеров — копией `ansible/inventory/multinode.example.yml`:
+`make add-worker INVENTORY=ansible/inventory/multinode.yml`.
+
+Как устроено:
+
+- **Токен присоединения.** На control plane создаётся bootstrap-токен
+  `kubeadm token create --ttl 15m` только для этого присоединения. Он
+  попадает на воркер в файле `JoinConfiguration` с правами 0600, который
+  удаляется сразу после `kubeadm join`, и сразу же удаляется из кластера
+  (`kubeadm token delete`). В git, командную строку и вывод Ansible токен не
+  попадает (`no_log`). Сертификат CA проверяется по хешу открытого ключа
+  (`caCertHashes`).
+- **Проверки до изменений.** Сначала проверяются SSH, ОС (Ubuntu, amd64) и
+  состояние узла; при любой проблеме команда останавливается, ничего не
+  изменив: воркер недоступен по SSH; WORKER — это сам control plane; на узле
+  есть свой control plane; узел уже в другом кластере (другой адрес
+  API-сервера или CA); имя узла уже занято; узел присоединялся раньше, но его
+  Node удалён. Сообщение объясняет, что сделать.
+- **Идемпотентность.** Присоединённый узел повторно не трогается: повторный
+  `make add-worker` и `./deploy.sh` на control plane дают `changed=0`,
+  ревизии Helm не меняются.
+- **Память control plane о воркерах.** Имена и адреса воркеров из фактов
+  Ansible сохраняются на control plane в `/etc/kubeadm-gateway/workers.json`
+  (0600). Поэтому обычный `./deploy.sh` на control plane (inventory —
+  только он сам) не теряет воркеры: одобритель сертификатов kubelet и
+  nftables продолжают их знать. На одном узле файла нет, и всё работает
+  ровно как раньше.
+- **Сертификат kubelet воркера** (`serverTLSBootstrap` приходит из ConfigMap
+  `kube-system/kubelet-config`) одобряет тот же скрипт с теми же проверками:
+  в сертификате только имя воркера и его IP из фактов Ansible. Продление —
+  ежечасным таймером на control plane. Отсюда работают `kubectl logs`,
+  `kubectl exec` и `kubectl top` для воркера без `--kubelet-insecure-tls`.
+- **Порты метрик (nftables).** Под с другого узла ходит к портам узла с
+  адресом своего узла (маскарадинг Cilium): Prometheus на control plane
+  скрейпит node-exporter и Cilium воркера с адреса `192.0.2.10`, а не из
+  сети подов. Поэтому в таблицу `kubeadm_gateway_metrics` каждого узла
+  добавлены адреса остальных узлов кластера; для остальной сети порты
+  по-прежнему закрыты (проверено с третьей машины: TCP reset на обоих узлах).
+- **NetworkPolicy** не менялись. Cilium различает трафик своего узла
+  (`host`, всегда разрешён — пробы kubelet) и соседнего (`remote-node`),
+  и политики к нему применяются. Проверено: с control plane к поду
+  демо-приложения на воркере — отказ (пускают только Envoy), а к правилам
+  «отовсюду на порт» (слушатели Envoy, вебхуки cert-manager и Envoy Gateway,
+  куда ходит API-сервер) — пропускает. Трафик между подами разных узлов
+  несёт identity пода (VXLAN), поэтому правила «от Prometheus»,
+  «от Fluentd» и т. п. работают как на одном узле.
+- **Gateway.** Cilium node IPAM с `externalTrafficPolicy: Cluster` выдаёт
+  Service адрес каждого узла: у Gateway становится два адреса (control plane
+  и воркер), запрос на любой из них доходит до любой реплики Envoy. `make
+  verify`, `make status`, `make ui` по-прежнему используют адрес control
+  plane (он же адрес API-сервера).
+- **Реплики Envoy и демо-приложения** разнесены по узлам topologySpread
+  (`ScheduleAnyway`, `matchLabelKeys: [pod-template-hash]` — при раскатке
+  считаются только поды новой ревизии, иначе старые поды на одном узле
+  выталкивают все новые на другой). Планировщик не переносит уже запущенные
+  поды, поэтому `make add-worker` в конце перезапускает (rolling, с учётом
+  PodDisruptionBudget) те Deployment со спредом по узлам, у которых все поды
+  на одном узле; если уже разнесены — ничего не делает.
+- **DaemonSet'ы** (Cilium, cilium-envoy, Fluentd, node-exporter) сами
+  появляются на воркере: логи его подов идут в VictoriaLogs, метрики узла —
+  в Prometheus. etcd-metrics-proxy — только на control plane.
+- **Control plane остаётся рабочим узлом** (taint и метка
+  `exclude-from-external-load-balancers` сняты, как на одном узле): тома
+  local-path Prometheus и VictoriaLogs созданы на нём и к нему привязаны
+  (PV с nodeAffinity), а Gateway сохраняет адрес control plane.
+- **`make remove-worker`**: drain (DaemonSet'ы пропускаются, PDB
+  соблюдаются), сброс воркера тем же `scripts/destroy.sh`, что и
+  `make destroy`, удаление Node, затем control plane забывает воркер
+  (nftables, одобритель). Узел с томами local-path команда отказывается
+  выводить (данные лежат только на нём). Недоступный по SSH воркер всё
+  равно выводится из кластера, сбросить его нужно позже вручную
+  (`sudo kubeadm reset`).
+
+Проверено на стенде: control plane 4 vCPU / 8 ГБ + воркер 2 vCPU / 4 ГБ
+(Ubuntu 24.04.5). `make add-worker` — 1,5–2 мин (на воркере уже стояли
+пакеты после `make destroy`; на новой машине добавится их загрузка, как в
+первом `./deploy.sh`); `make verify` — 32 ✓ и 1 пропуск; повторный
+`make add-worker` и повторный `./deploy.sh` — `changed=0`, ревизии Helm
+те же; перезагрузка воркера — через ~1 мин снова `Ready`, `make verify`
+зелёный; `make remove-worker` — около минуты, на воркере не осталось
+kubelet, Cilium и nftables-таблицы, одноузловой `make verify` зелёный
+(26 ✓).
+
+Ограничения: один control plane (etcd без HA: потеря control plane — потеря
+кластера); тома local-path привязаны к узлу, на котором созданы; воркеры —
+Ubuntu 24.04 amd64 в одной сети с control plane (нужны TCP 6443, 10250 и
+UDP 8472 между узлами); `make destroy` на control plane воркеры не
+сбрасывает (предупреждает о них) — сначала `make remove-worker`; e2e в CI
+проверяет только одноузловой сценарий.
+
 ## CI/CD
 
 Два workflow GitHub Actions на раннерах `ubuntu-24.04`:
@@ -952,10 +1063,9 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   сертификате только имя этого узла и его IP из фактов Ansible (IPv6
   сравниваются в нормализованном виде); остальное остаётся pending с
   сообщением. Список узлов (`/etc/kubeadm-gateway/kubelet-serving-nodes.json`,
-  0600) пишется на каждом деплое из всех хостов inventory, так что воркеры,
-  добавленные в inventory, одобряются тем же путём (сам join воркеров пока
-  не автоматизирован). Скрипт запускают каждый `make deploy` и раз в час
-  systemd-таймер `kubeadm-gateway-kubelet-cert-approver.timer` на control
+  0600) пишется на каждом деплое из хостов inventory и воркеров, известных
+  control plane (см. «Несколько узлов»). Скрипт запускают каждый `make
+  deploy` и раз в час systemd-таймер `kubeadm-gateway-kubelet-cert-approver.timer` на control
   plane — так продление сертификата (kubelet просит новый на 70–90 % срока
   в год) одобряется и без деплоя; `make destroy` таймер снимает. Для уже
   созданного кластера та же задача включает настройку на узле и в ConfigMap
@@ -1000,8 +1110,10 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 - **Rate limit локальный, на реплику Envoy**: при двух репликах Gateway
   пропускает до 2× лимита. Общий лимит потребовал бы сервис rate limit
   Envoy Gateway и Redis — не делали.
-- **Один узел, IPv4, amd64.** Адрес API-сервера (IP узла) после создания
-  кластера не меняется, см. «Запуск».
+- **Один control plane, IPv4, amd64.** Воркеры добавляются
+  (`make add-worker`, см. «Несколько узлов»), но control plane один, etcd
+  без HA. Адрес API-сервера (IP узла) после создания кластера не меняется,
+  см. «Запуск».
 - **Плагин VictoriaLogs для Grafana** скачивается с grafana.com при каждом
   старте Grafana (она без PVC: дашборды и источники данных — из
   ConfigMap). Если сайт недоступен, панели логов в Grafana пустые, логи
@@ -1012,10 +1124,7 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   webhook, который пишет их в лог (VictoriaLogs); почты, мессенджеров и
   дежурств нет. SLO-бюджет за 30 дней оценивается по темпу последних 3 дней:
   Prometheus хранит 3 дня метрик.
-- **Сетевые политики и закрытие портов метрик рассчитаны на один узел.**
-  Вебхуки и пробы kubelet проходят как трафик самого узла; на нескольких
-  узлах понадобятся правила для соседних узлов (`ipBlock` их адресов), а в
-  таблицу nftables — их адреса. Исходящий трафик подов не ограничен.
+- **Исходящий трафик подов не ограничен** (политики только на входящий).
 - **Сеть при развёртывании.** Короткие сбои сети (репозитории чартов,
   реестры образов) переживаются повторами, но долгий обрыв прерывает
   развёртывание — тогда достаточно запустить `./deploy.sh` ещё раз.

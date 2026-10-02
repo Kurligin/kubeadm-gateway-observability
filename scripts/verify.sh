@@ -23,6 +23,9 @@
 #   ENVOY_REPLICAS  Envoy replicas of the Gateway (default: from the
 #                cluster, else 2), for the rate limit check
 #
+# With worker nodes (`make add-worker`), step 9 checks every node; on a
+# single node it is skipped.
+#
 # Every request goes straight to the Gateway, never through an HTTP proxy
 # that may be set in the environment.
 #
@@ -753,6 +756,173 @@ check_cilium_metrics() {
   expect_unreachable "http://${GATEWAY_IP}:9962/metrics" "Cilium metrics :9962"
 }
 
+# --- 9. Several nodes ----------------------------------------------------------
+
+# Node name -> InternalIP of every node, and the names of the workers (no
+# control-plane role), set by multinode().
+nodes_tsv=""
+workers=""
+
+# multinode: 0 if the cluster has more than one node (kubectl needed);
+# otherwise sets $reason and returns 2 (skipped).
+multinode() {
+  have_kubectl || {
+    reason="no kubectl access to this cluster"
+    return 2
+  }
+  if [[ -z ${nodes_tsv} ]]; then
+    local nodes
+    nodes="$(kubectl get nodes -o json)" || {
+      reason="kubectl get nodes failed"
+      return 1
+    }
+    nodes_tsv="$(jq -r '.items[] | "\(.metadata.name)\t\([.status.addresses[] | select(.type == "InternalIP") | .address] | first)"' <<<"${nodes}")"
+    workers="$(jq -r '.items[] | select(.metadata.labels | has("node-role.kubernetes.io/control-plane") | not) | .metadata.name' <<<"${nodes}" | xargs)"
+  fi
+  if [[ $(wc -l <<<"${nodes_tsv}") -le 1 ]]; then
+    reason="single node (workers join with \`make add-worker\`)"
+    return 2
+  fi
+}
+
+# Every DaemonSet has a ready pod on each node it targets; the per-node
+# agents (Cilium, Fluentd, node-exporter) target every node.
+check_daemonsets() {
+  multinode || return
+  local ds count bad short
+  count=$(wc -l <<<"${nodes_tsv}")
+  ds="$(kubectl get daemonsets --all-namespaces -o json)" || {
+    reason="kubectl get daemonsets failed"
+    return 1
+  }
+  bad="$(jq -r --argjson n "${count}" '.items[]
+    | .metadata.name as $name
+    | select(.status.numberReady < .status.desiredNumberScheduled
+        or (($name == "cilium" or $name == "fluentd" or ($name | endswith("node-exporter"))) and .status.desiredNumberScheduled != $n))
+    | "\(.metadata.namespace)/\($name) \(.status.numberReady)/\(.status.desiredNumberScheduled)"' <<<"${ds}" | xargs)"
+  if [[ -n ${bad} ]]; then
+    reason="not ready on every node: ${bad}"
+    return 1
+  fi
+  short="$(jq -r '[.items[] | select(.metadata.name == "cilium" or .metadata.name == "fluentd" or (.metadata.name | endswith("node-exporter")))
+    | "\(.metadata.name | sub("kube-prometheus-stack-prometheus-"; "")) \(.status.numberReady)/\(.status.desiredNumberScheduled)"] | join(", ")' <<<"${ds}")"
+  reason="${count} nodes, every DaemonSet ready on each: ${short}"
+}
+
+# Envoy and the demo app run on more than one node (topologySpread);
+# replicas that piled up on one node (e.g. after a long outage of a
+# worker) are spread again by `make add-worker`.
+check_spread() {
+  multinode || return
+  local pods line app nodes summary="" bad=""
+  pods="$(kubectl get pods --all-namespaces -o json)" || {
+    reason="kubectl get pods failed"
+    return 1
+  }
+  while read -r line; do
+    app=${line%%$'\t'*}
+    nodes=${line#*$'\t'}
+    summary+="${summary:+; }${app} on ${nodes}"
+    [[ ${nodes} == *","* ]] || bad+=" ${app}"
+  done < <(jq -r '[.items[] | select(.status.phase == "Running")
+      | {app: (if .metadata.namespace == "envoy-gateway-system" and .metadata.labels["app.kubernetes.io/component"] == "proxy" then "envoy"
+               elif .metadata.namespace == "demo" then .metadata.labels["app.kubernetes.io/component"] // empty
+               else empty end), node: .spec.nodeName}]
+    | group_by(.app)[] | "\(.[0].app)\t\([.[].node] | unique | join(","))"' <<<"${pods}")
+  reason=${summary:-no Envoy or demo app pods}
+  if [[ -n ${bad} || -z ${summary} ]]; then
+    reason+="; on one node only:${bad} (\`make add-worker\` spreads them again)"
+    return 1
+  fi
+}
+
+# The Gateway has an address on every node (Cilium node IPAM,
+# externalTrafficPolicy Cluster) and answers on each of them.
+check_gateway_addresses() {
+  multinode || return
+  local addresses ip code ok="" bad=""
+  addresses="$(kubectl -n "${GATEWAY_NAMESPACE}" get gateway "${GATEWAY_NAME}" \
+    -o jsonpath='{range .status.addresses[*]}{.value}{"\n"}{end}' 2>/dev/null)"
+  while read -r ip; do
+    [[ -n ${ip} ]] || continue
+    code="$(curl -sS --noproxy '*' --max-time 15 --cacert "${CA_FILE}" -o /dev/null -w '%{http_code}' \
+      --resolve "app.${DOMAIN}:443:${ip}" "https://app.${DOMAIN}/" 2>/dev/null || true)"
+    if [[ ${code} == "200" ]]; then ok+=" ${ip}"; else bad+=" ${ip}:${code:-000}"; fi
+  done <<<"${addresses}"
+  reason="HTTPS 200 via${ok:- none}"
+  if [[ -n ${bad} ]]; then
+    reason+="; failed:${bad}"
+    return 1
+  fi
+  if [[ $(wc -w <<<"${ok}") -lt $(wc -l <<<"${nodes_tsv}") ]]; then
+    reason+="; fewer Gateway addresses than nodes"
+    return 1
+  fi
+}
+
+# The API server reaches the kubelet of every worker with a verified
+# certificate: `kubectl logs` of a pod there and `kubectl top` of the node.
+check_worker_kubelet() {
+  multinode || return
+  local node pod top details=""
+  top="$(kubectl top nodes --no-headers 2>/dev/null)" || top=""
+  for node in ${workers}; do
+    pod="$(kubectl -n kube-system get pods -l k8s-app=cilium --field-selector "spec.nodeName=${node}" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+    if [[ -z ${pod} ]] || ! kubectl -n kube-system logs "${pod}" -c cilium-agent --tail=1 >/dev/null 2>&1; then
+      reason="kubectl logs of ${pod:-a cilium pod} on ${node} failed"
+      return 1
+    fi
+    if ! awk -v n="${node}" '$1 == n { found = 1 } END { exit !found }' <<<"${top}"; then
+      reason="kubectl top nodes: no data for ${node}"
+      return 1
+    fi
+    details+="${details:+; }${node}: logs of ${pod}, top $(awk -v n="${node}" '$1 == n { print "CPU " $2 ", memory " $4 }' <<<"${top}")"
+  done
+  reason=${details}
+}
+
+# Logs of pods on every worker reach VictoriaLogs.
+check_worker_logs() {
+  multinode || return
+  [[ -n ${UI_PASSWORD} ]] || {
+    reason="UI_PASSWORD not set"
+    return 2
+  }
+  local node count details=""
+  for node in ${workers}; do
+    count="$(ui_get logs /select/logsql/query \
+      --data-urlencode "query=_time:10m kubernetes.host:\"${node}\" | stats count() as n" 2>/dev/null |
+      jq -r '.n // empty' 2>/dev/null || true)"
+    if [[ -z ${count} || ${count} -eq 0 ]]; then
+      reason="no log records from pods on ${node} within the last 10 min"
+      return 1
+    fi
+    details+="${details:+; }${node}: ${count} records in 10 min"
+  done
+  reason=${details}
+}
+
+# Prometheus scrapes node-exporter and the kubelet of every node.
+check_worker_metrics() {
+  multinode || return
+  [[ -n ${UI_PASSWORD} ]] || {
+    reason="UI_PASSWORD not set"
+    return 2
+  }
+  local node ip exporter kubelet details=""
+  while IFS=$'\t' read -r node ip; do
+    exporter="$(promql_value "up{job=\"node-exporter\",instance=\"${ip}:9100\"} * on (instance) group_left (nodename) node_uname_info{nodename=\"${node}\"}")"
+    kubelet="$(promql_value "up{job=\"kubelet\",metrics_path=\"/metrics\",node=\"${node}\"}")"
+    if [[ ${exporter} != "1" || ${kubelet} != "1" ]]; then
+      reason="${node}: node-exporter up=${exporter:-none}, kubelet up=${kubelet:-none}"
+      return 1
+    fi
+    details+="${details:+, }${node}"
+  done <<<"${nodes_tsv}"
+  reason="node-exporter and kubelet up on ${details}"
+}
+
 # --- Main ---------------------------------------------------------------------
 
 setup() {
@@ -775,8 +945,20 @@ setup() {
   have_kubectl && kube=true
   if [[ -z ${GATEWAY_IP:-} ]]; then
     [[ ${kube} == true ]] || die "no kubectl access: set GATEWAY_IP (and CA_FILE, UI_PASSWORD), see the header of $0"
-    GATEWAY_IP="$(kubectl -n "${GATEWAY_NAMESPACE}" get gateway "${GATEWAY_NAME}" \
-      -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)"
+    # With workers the Gateway has an address on every node; the checks
+    # below that look at the control plane (etcd, its metrics proxy) need
+    # the control plane's, which is also the API server address.
+    local addresses server
+    addresses="$(kubectl -n "${GATEWAY_NAMESPACE}" get gateway "${GATEWAY_NAME}" \
+      -o jsonpath='{range .status.addresses[*]}{.value}{"\n"}{end}' 2>/dev/null || true)"
+    server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+    server=${server#https://}
+    server=${server%:*}
+    if grep -qxF "${server}" <<<"${addresses}"; then
+      GATEWAY_IP=${server}
+    else
+      GATEWAY_IP="$(head -n1 <<<"${addresses}")"
+    fi
     [[ -n ${GATEWAY_IP} ]] || die "Gateway ${GATEWAY_NAMESPACE}/${GATEWAY_NAME} has no address yet"
   fi
   if [[ -z ${CA_FILE:-} || ! -s ${CA_FILE:-} ]]; then
@@ -835,6 +1017,20 @@ main() {
   check 8 "etcd metrics proxy requires token" check_etcd_proxy_auth
   check 8 "node-exporter :9100 requires token" check_node_exporter
   check 8 "Cilium metrics :9962 closed to the LAN" check_cilium_metrics
+  local rc=0
+  multinode || rc=$?
+  if [[ ${rc} -eq 1 ]]; then
+    result 9 "Several nodes" fail "${reason}"
+  elif [[ ${rc} -eq 0 ]]; then
+    check 9 "Nodes: DaemonSets ready on every node" check_daemonsets "${WAIT}"
+    check 9 "Nodes: Envoy and demo app on several nodes" check_spread
+    check 9 "Nodes: Gateway answers on every node address" check_gateway_addresses 60
+    check 9 "Nodes: kubectl logs / top on every worker" check_worker_kubelet 120
+    check 9 "Nodes: worker pod logs in VictoriaLogs" check_worker_logs 120
+    check 9 "Nodes: node-exporter, kubelet up per node" check_worker_metrics 120
+  else
+    result 9 "Several nodes" skip "${reason}"
+  fi
 
   printf '\nPassed: %d, failed: %d, skipped: %d\n' "${passed}" "${failed}" "${skipped}"
   if [[ ${failed} -gt 0 ]]; then
