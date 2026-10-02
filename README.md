@@ -10,10 +10,12 @@
 
 ## TL;DR
 
-На Ubuntu 24.04 amd64 (4 vCPU / 8 ГБ / 30 ГБ, sudo, интернет). `./deploy.sh`
-идёт ~8–10 мин, повторный запуск — ~40–50 с и ничего не меняет;
-`make verify` — 45–90 с (на двух узлах дольше): таблица проверок, код
-возврата 0 — всё работает.
+На Ubuntu 24.04 amd64 (4 vCPU / 8 ГБ / 30 ГБ и больше, sudo, интернет).
+`./deploy.sh` идёт ~8–10 мин, повторный запуск — ~40–50 с и ничего не
+меняет; `make verify` — 45–90 с (на двух узлах дольше): таблица проверок,
+код возврата 0 — всё работает. Сеть в РФ учтена: образы Docker Hub идут через
+зеркала, чарты лежат в репозитории, ни Docker Hub, ни get.helm.sh, ни
+`*.github.io`, ни grafana.com не обязательны ([подробно](#сеть-в-рф-зеркала)).
 
 ```bash
 git clone https://github.com/Kurligin/kubeadm-gateway-observability.git
@@ -35,7 +37,7 @@ Passed: 29, failed: 0, skipped: 2
 RESULT: OK
 ```
 
-[Описание](#краткое-описание) · [Архитектура](#архитектура) · [Версии](#технологии-и-версии) · [Gateway API](#gateway-api) · [Требования](#требования-к-среде) · [Развёртывание](#развёртывание) · [Проверка](#проверка) · [Доп. возможности](#дополнительные-возможности) · [CI/CD](#cicd) · [Ограничения](#известные-ограничения) · [Документация](#документация)
+[Описание](#краткое-описание) · [Архитектура](#архитектура) · [Версии](#технологии-и-версии) · [Gateway API](#gateway-api) · [Требования](#требования-к-среде) · [Развёртывание](#развёртывание) · [Сеть в РФ](#сеть-в-рф-зеркала) · [Проверка](#проверка) · [Доп. возможности](#дополнительные-возможности) · [CI/CD](#cicd) · [Ограничения](#известные-ограничения) · [Документация](#документация)
 
 ## Краткое описание
 
@@ -148,8 +150,11 @@ Hello World! version=v1 pod=web-v1-…
 | CPU / ОЗУ | 2 vCPU / 4 ГБ (трейсинг выключится сам) | 4 vCPU / 8 ГБ (трейсинг включится сам) |
 | Диск | 20 ГБ | 30 ГБ |
 
-Ещё нужны постоянный IP узла, `sudo` (с паролем или без) или root,
-интернет (apt, pkgs.k8s.io, GitHub, реестры) — напрямую или через прокси.
+Машина проверки (4 vCPU / 16 ГБ / до 100 ГБ) — с запасом: трейсинг
+включится сам. Ещё нужны постоянный IP узла, `sudo` (с паролем или без) или
+root и интернет — напрямую или через прокси: apt (архив Ubuntu,
+pkgs.k8s.io), PyPI, GitHub, реестры quay.io, registry.k8s.io,
+docker.angie.software и зеркала Docker Hub ([какие](#сеть-в-рф-зеркала)).
 Проверено: ВМ Proxmox 4/8 (Ubuntu 24.04.5) — один узел и с воркером 2/4; ВМ
 2/4; раннер GitHub `ubuntu-24.04`; Vagrant (libvirt); узел только за прокси.
 Замеры — [docs/operations.md](docs/operations.md#ресурсы-память-и-диск).
@@ -173,6 +178,44 @@ Hello World! version=v1 pod=web-v1-…
 | трейсинг явно | `TRACING=true ./deploy.sh` или `TRACING=false ./deploy.sh` |
 | второй узел | `make add-worker WORKER=<IP> WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519` ([ниже](#несколько-узлов)) |
 | удалить кластер | `make destroy FORCE=1` |
+
+### Сеть в РФ: зеркала
+
+Проверка идёт из российской сети, где часть источников недоступна. Решение
+от них не зависит:
+
+| Что | Откуда | Если источник недоступен |
+|---|---|---|
+| Образы Docker Hub (Grafana, Envoy, Envoy Gateway, Fluentd, local-path, busybox, python) | зеркала по порядку: `dh-mirror.gitverse.ru` → `mirror.gcr.io` → `docker.m.daocloud.io`, последним — сам Docker Hub | containerd переходит к следующему |
+| Образы quay.io, registry.k8s.io, docker.angie.software | напрямую (у эксперта quay.io и pkgs.k8s.io доступны) | для quay.io, registry.k8s.io, ghcr.io зеркало задаётся переменной (ниже) |
+| Чарты Helm (Cilium, cert-manager, Envoy Gateway, kube-prometheus-stack, VictoriaLogs/Traces, metrics-server) | [`vendor/charts`](vendor/charts) в репозитории, 3 МБ | сеть не нужна |
+| helm | get.helm.sh, затем зеркало `mirrors.huaweicloud.com/helm` | следующий источник, ошибка называет все |
+| containerd, runc, helmfile, helm-diff, плагин VictoriaLogs для Grafana | релизы GitHub | повтор; Grafana стартует и без плагина |
+| Пакеты Kubernetes, ansible-core | pkgs.k8s.io, PyPI | повтор: `./deploy.sh` ещё раз |
+
+Зеркала Docker Hub проверены 02.10.2026 из домашней сети в РФ: каждое
+отдало манифесты и слои всех наших образов по digest. Первым стоит
+GitVerse (в РФ, самое быстрое), затем `mirror.gcr.io` (Google), затем
+DaoCloud (медленнее, но полное); `dockerhub.timeweb.cloud` и `huecker.io`
+отдали не все образы, `cr.yandex/mirror` наших образов не держит — их нет в
+списке. Список — `/etc/containerd/certs.d/docker.io/hosts.toml` на узле,
+по умолчанию — `DEFAULT_REGISTRY_MIRRORS_DOCKER_IO` в
+[`versions.env`](versions.env). Свой список (через запятую, по порядку) или
+без зеркал:
+
+```bash
+REGISTRY_MIRRORS_DOCKER_IO=https://mirror.example.ru ./deploy.sh
+REGISTRY_MIRRORS_DOCKER_IO= ./deploy.sh
+REGISTRY_MIRRORS_QUAY_IO=https://quay.m.daocloud.io REGISTRY_MIRRORS_REGISTRY_K8S_IO=https://k8s.m.daocloud.io ./deploy.sh
+```
+
+**Почему зеркалу можно доверять:** все образы закреплены по digest
+(`make lint` это проверяет), а containerd сверяет с ним каждый манифест и
+слой. Зеркало может только не отдать образ — тогда containerd идёт к
+следующему, — но подменить содержимое не может. Чарты в `vendor/charts` и
+бинарники проверяются по sha256 из `versions.env`, плагин Grafana — по
+подписи VictoriaMetrics. С прокси зеркала совместимы: containerd ходит к ним
+через тот же прокси ([docs/operations.md](docs/operations.md#сеть-в-рф-зеркала-и-источники)).
 
 ### Несколько узлов
 
@@ -198,6 +241,26 @@ make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
 Подробнее — [docs/operations.md](docs/operations.md#несколько-узлов).
 
 ## Проверка
+
+**Имена для браузера и curl** — строка в `/etc/hosts` машины, с которой
+проверяете (IP — адрес узла, он же адрес Gateway; его же печатает `make ui`):
+
+```text
+<IP> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local
+```
+
+IP на узле и добавление строки (второй командой — на машине проверки, со
+своим IP):
+
+```bash
+kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].value}{"\n"}'
+echo "192.168.1.38 app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local" | sudo tee -a /etc/hosts
+```
+
+Сертификаты выпущены демо-CA: `make ca` пишет его в `ca.crt` (для
+`curl --cacert` или импорта в браузер). Без правки `/etc/hosts` —
+`curl --resolve` (ниже) или SSH-туннель
+([docs/verification.md](docs/verification.md#веб-интерфейсы)).
 
 `make verify` на узле делает всё описанное ниже сам (около 30 проверок в 10
 шагах, 45–90 с, таблица — [docs/verification.md](docs/verification.md)); с
@@ -335,7 +398,8 @@ gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID 
 | UI на Gateway: basic auth, наружу только чтение | шаг 8 |
 | NetworkPolicy default-deny, Pod Security `restricted`, порты метрик узла закрыты nftables | шаг 8, [docs/security.md](docs/security.md) |
 | Пароли генерируются при деплое, секретов в git нет | `make ui` |
-| Все образы по digest, бинарники по sha256, предзагрузка `make images` | `make lint`, [`images.txt`](images.txt) |
+| Все образы по digest, бинарники и чарты (в репозитории) по sha256, предзагрузка `make images` | `make lint`, [`images.txt`](images.txt) |
+| Сеть в РФ: зеркала Docker Hub по порядку с откатом на оригинал, запасной источник helm, чарты без github.io | [сеть в РФ](#сеть-в-рф-зеркала) |
 | Работа через HTTP(S)-прокси | [docs/operations.md](docs/operations.md#прокси) |
 | Несколько узлов: `make add-worker` / `make remove-worker` | шаг 9 |
 | Vagrant для тех, у кого нет Ubuntu 24.04 | `vagrant up` |
@@ -354,7 +418,11 @@ gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID 
 - **Rate limit локальный** — на реплику Envoy (Gateway пропускает до 2×).
 - **Алерты не уходят из кластера** (получатель пишет их в лог); SLO за 30
   дней оценивается по 3 дням метрик.
-- **Плагин VictoriaLogs для Grafana** качается с grafana.com при старте.
+- **Плагин VictoriaLogs для Grafana** качается с GitHub при старте Grafana
+  (без доступа к GitHub датасорс недоступен, логи видны в vmui).
+- **Зеркала Docker Hub — сторонние публичные сервисы**, их доступность не
+  гарантирована; если не ответит ни одно, образ тянется с Docker Hub
+  напрямую ([как сменить список](#сеть-в-рф-зеркала)).
 - **Трейсинг** — только спаны Envoy, sampling 100 %; запросы со своим
   `X-Request-ID` не в формате UUID не трассируются; VictoriaTraces — 0.x.
 - **Исходящий трафик подов не ограничен**; `kubeadm upgrade` не

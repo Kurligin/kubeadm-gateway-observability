@@ -31,7 +31,7 @@ Gateway (80/443). Защищаем: управление кластером, д�
 | Метрики узла, etcd и Cilium читаются из локальной сети без аутентификации | etcd только на `127.0.0.1` + kube-rbac-proxy (TLS, токен, RBAC); node-exporter за kube-rbac-proxy; nftables закрывает порты Cilium | `:2381` refused, `:2382`/`:9100` без токена 401, `:9962` с другой машины refused |
 | Подмена сертификата kubelet (MITM между API и kubelet) | `serverTLSBootstrap`, CSR одобряется только с именем и IP узла из inventory | `kubectl get csr`: чужие SAN остаются pending |
 | Пароли и токены утекают через git, логи, список процессов | пароли генерируются при первом деплое в Secret; join-токен TTL 15 мин, `no_log`; прокси-учётки только в файлах 0600 | `git grep` по репозиторию; `make ui` — единственный способ увидеть пароли |
-| Подмена образов, бинарников, пакетов | образы по digest, бинарники по sha256, ключ apt по отпечатку | `make lint` (проверка digest), `versions.env` |
+| Подмена образов, бинарников, чартов, пакетов (в том числе зеркалом реестра) | образы по digest, бинарники и чарты по sha256, плагин Grafana по подписи, ключ apt по отпечатку | `make lint` (digest, sha256 чартов), `versions.env` |
 | Ошибки конфигурации манифестов | kubeconform strict, trivy config, kube-linter в CI | workflow `lint` |
 
 ## Доступ к UI и API наблюдаемости
@@ -192,8 +192,21 @@ metrics-server работают с проверкой TLS.
   одного образа (включая встроенные в аргументы операторов) нет digest или
   `images.txt` устарел. Исключение — образы control plane kubeadm: kubeadm
   берёт их по тегу версии Kubernetes и digest задать не позволяет.
+- **Зеркала реестров** (Docker Hub по умолчанию,
+  [operations.md](operations.md#сеть-в-рф-зеркала-и-источники)) не
+  расширяют доверие: образ запрашивается по digest, containerd сверяет с
+  ним индекс, манифест и каждый слой. Зеркало может отказать или отдать
+  чужие байты — тогда загрузка падает и containerd идёт к следующему
+  источнику; запустить подменённый образ оно не может. То же у `make images`.
 - Бинарники (containerd, runc, helm, helmfile, helm-diff, инструменты lint)
-  проверяются по sha256 из `versions.env`.
+  проверяются по sha256 из `versions.env` — из какого бы источника они ни
+  пришли (у helm их два).
+- Чарты сторонних проектов лежат в `vendor/charts` (архивы, которые отдают их
+  репозитории); `make lint` и `make platform` сверяют их sha256 с
+  `versions.env` и версию в `Chart.yaml` внутри архива.
+- Плагин VictoriaLogs для Grafana подписан VictoriaMetrics; Grafana
+  проверяет подпись и хэши файлов встроенным ключом, неподписанные плагины
+  не разрешены.
 - Ключ pkgs.k8s.io принимается только при совпадении отпечатка
   `K8S_APT_KEY_FINGERPRINT`; пакеты закреплены apt pinning и `hold`.
 - CI: kubeconform (strict), trivy config (HIGH/CRITICAL везде, MEDIUM в

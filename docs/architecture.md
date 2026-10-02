@@ -64,9 +64,11 @@
    kube-prometheus-stack, etcd-metrics-proxy, VictoriaLogs → Fluentd,
    VictoriaTraces (если включён трейсинг); в конце — ui-routes и
    metrics-server. После этого проверяются Secret'ы с паролями (basic auth и
-   admin Grafana). Репозитории чартов загружаются заранее, с повторами при
-   сбое сети; первая установка не печатает diff, повторные — печатают только
-   изменения.
+   admin Grafana). Чарты сторонних проектов берутся из `vendor/charts`
+   (сверка версий и sha256 — перед установкой), к репозиториям чартов
+   helmfile не обращается; при сбое (например, загрузки образа) helmfile
+   повторяется. Первая установка не печатает diff, повторные — печатают
+   только изменения.
 
 ## Трафик: Gateway API
 
@@ -168,7 +170,8 @@ namespaces.
   того же чарта убран post-renderer'ом `scripts/drop-manifests.sh`: у чарта
   нет переключателя для отдельных дашбордов, а логи здесь собирает Fluentd).
   Источник данных VictoriaLogs — плагин `victoriametrics-logs-datasource`,
-  Grafana скачивает его с grafana.com при старте.
+  Grafana скачивает его из релиза GitHub при старте (подписан, подпись
+  проверяется).
 - **metrics-server** (kube-system) отдаёт Resource Metrics API без
   `--kubelet-insecure-tls`: kubelet получает серверный сертификат от CA
   кластера (`serverTLSBootstrap`, см. [security.md](security.md#сертификаты-kubelet-от-ca-кластера)),

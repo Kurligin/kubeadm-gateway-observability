@@ -7,6 +7,7 @@
 - [Развёртывание](#развёртывание)
 - [IP узла](#ip-узла)
 - [Прокси](#прокси)
+- [Сеть в РФ: зеркала и источники](#сеть-в-рф-зеркала-и-источники)
 - [Нет Ubuntu 24.04? `vagrant up`](#нет-ubuntu-2404-vagrant-up)
 - [Трейсинг (`TRACING`)](#трейсинг-tracing)
 - [Несколько узлов](#несколько-узлов)
@@ -96,9 +97,11 @@ export HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:312
 |---|---|
 | `deploy.sh`: apt (`python3-venv`, `make`), pip | переменные окружения (sudo их сохраняет) |
 | Ansible: `get_url` (containerd, runc, helm, helmfile, ключ pkgs.k8s.io), apt | окружение плея; apt — `/etc/apt/apt.conf.d/95kubeadm-gateway-proxy` |
-| containerd (все образы, в т. ч. для kubeadm) | systemd drop-in → `EnvironmentFile=/etc/kubeadm-gateway/containerd-proxy.env` (0600) |
-| helm/helmfile (чарты), `make images` | окружение `make` |
-| Grafana (плагин VictoriaLogs с grafana.com) | `HTTP(S)_PROXY` из Secret чарта Grafana (`envRenderSecret`; только при заданном прокси) |
+| containerd (все образы, в т. ч. для kubeadm; зеркала реестров тоже) | systemd drop-in → `EnvironmentFile=/etc/kubeadm-gateway/containerd-proxy.env` (0600) |
+| `make images` (`ctr`) | окружение `make` |
+| Grafana (плагин VictoriaLogs с GitHub) | `HTTP(S)_PROXY` из Secret чарта Grafana (`envRenderSecret`; только при заданном прокси) |
+
+helmfile в сеть не ходит: чарты лежат в `vendor/charts`.
 
 kubelet прокси не нужен: образы тянет containerd. `NO_PROXY` дополняется
 автоматически (`scripts/no-proxy.sh`): `localhost`, `127.0.0.1`, все
@@ -115,6 +118,76 @@ IP узла — иначе запрос к API-серверу уйдёт в пр
 соседней ВМ; `./deploy.sh` с чистой ОС — 8 мин, `make verify` — все ✓.
 Повторный запуск без прокси убрал настройки (changed=3), следующий —
 changed=0.
+
+## Сеть в РФ: зеркала и источники
+
+Из российской сети часть источников недоступна или рвёт TLS (Docker Hub,
+get.helm.sh, `*.github.io`, grafana.com). Развёртывание обходится без них:
+
+- **Образы Docker Hub** — через зеркала containerd. Для каждого реестра с
+  зеркалами роль `containerd` пишет `/etc/containerd/certs.d/<реестр>/hosts.toml`
+  (`config_path` в `config.toml`): зеркала перебираются по порядку, последним
+  — сам реестр. containerd читает эти файлы при каждой загрузке (перезапуск
+  не нужен), `make images` передаёт их `ctr` через `--hosts-dir`. Зеркало,
+  которое не ответило за 10 с (`dial_timeout`) или не отдало образ,
+  пропускается.
+- **Чарты** — архивы в `vendor/charts` (те самые файлы, что отдают
+  репозитории, 3 МБ), sha256 — в `versions.env`. `make platform` и
+  `make lint` сверяют версии и sha256 без сети
+  (`scripts/vendor-charts.sh check`); после смены версии в `versions.env`
+  `scripts/vendor-charts.sh sha` печатает новые sha256, а
+  `scripts/vendor-charts.sh fetch` скачивает архивы.
+- **helm** — `get.helm.sh`, при сбое — `mirrors.huaweicloud.com/helm` (тот же
+  архив, sha256 тот же); недоступный источник Ansible показывает как
+  проигнорированную ошибку, а если не сработал ни один — останавливается и
+  перечисляет все с причинами. Так же устроен `make lint-deps`
+  (`scripts/install-tool.sh`). Остальные бинарники — с GitHub, с повтором.
+- **Плагин VictoriaLogs для Grafana** — из релиза GitHub
+  (`<id>@<версия>@<url>` в `plugins.preinstall`), а не из каталога
+  grafana.com. Это тот же архив, что отдаёт grafana.com; он подписан
+  VictoriaMetrics, и Grafana проверяет подпись и хэши всех файлов встроенным
+  ключом, поэтому `allow_loading_unsigned_plugins` не нужен.
+
+Зеркала Docker Hub по умолчанию (`DEFAULT_REGISTRY_MIRRORS_DOCKER_IO` в
+`versions.env`) проверены 02.10.2026 из домашней сети в РФ: манифест и
+самый большой слой каждого docker.io-образа из `images.txt` скачаны по
+digest и сверены.
+
+| Зеркало | Результат | Порядок |
+|---|---|---|
+| `dh-mirror.gitverse.ru` (GitVerse, РФ) | 7 из 7, манифест за 0,1–2 с, слой Grafana 290 МБ за 31 с | 1 |
+| `mirror.gcr.io` (Google) | 7 из 7, слой Grafana за 38 с | 2 |
+| `docker.m.daocloud.io` (DaoCloud) | 7 из 7, но ~10 с на каждый запрос | 3 |
+| `dockerhub.timeweb.cloud` | 3 из 7, остальные — таймаут | нет |
+| `huecker.io` | 5 из 7 | нет |
+| `cr.yandex/mirror`, `docker.1panel.live`, `registry.docker-cn.com` | 404 / 403 / не отвечает | нет |
+
+Переопределение — переменными окружения при запуске (`./deploy.sh`,
+`make cluster`, `make add-worker`): `REGISTRY_MIRRORS_DOCKER_IO`,
+`REGISTRY_MIRRORS_QUAY_IO`, `REGISTRY_MIRRORS_REGISTRY_K8S_IO`,
+`REGISTRY_MIRRORS_GHCR_IO` — URL `https://хост[:порт]` через запятую, по
+порядку. Не задана — значение по умолчанию (у Docker Hub — список выше, у
+остальных — без зеркал), пустая — без зеркал: `hosts.toml`, записанный
+прошлым запуском, удаляется (чужие файлы в `certs.d` не трогаются). Для
+quay.io и registry.k8s.io проверены `https://quay.m.daocloud.io` и
+`https://k8s.m.daocloud.io`.
+
+```bash
+REGISTRY_MIRRORS_DOCKER_IO=https://mirror.example.ru,https://mirror.gcr.io ./deploy.sh
+REGISTRY_MIRRORS_DOCKER_IO= ./deploy.sh
+sudo cat /etc/containerd/certs.d/docker.io/hosts.toml
+```
+
+Безопасность: образы закреплены по digest, и containerd сверяет с ним
+каждый манифест и слой, поэтому зеркало может только отказать, но не
+подменить образ ([security.md](security.md#цепочка-поставки)). С прокси
+зеркала совместимы: containerd ходит к ним через прокси развёртывания.
+
+Проверено на чистой ВМ: Docker Hub, get.helm.sh, `*.github.io` чартов,
+helm.cilium.io, charts.jetstack.io, grafana.com и storage.googleapis.com
+закрыты (на узле и в DNS кластера), GitHub, quay.io, registry.k8s.io,
+pkgs.k8s.io и PyPI открыты — `./deploy.sh` и `make verify` зелёные,
+датасорс VictoriaLogs в Grafana работает.
 
 ## Нет Ubuntu 24.04? `vagrant up`
 
@@ -252,7 +325,8 @@ make remove-worker WORKER=192.0.2.21
 Все образы закреплены по digest (`versions.env`, список — `images.txt`).
 `make images` после `make cluster` скачивает их в containerd (`ctr -n
 k8s.io images pull` по `repo@sha256`, ровно под теми именами, что ищет
-kubelet) с повторами при сбое; уже скачанные пропускаются. Так все образы
+kubelet, через те же зеркала, что и kubelet) с повторами при сбое; уже
+скачанные пропускаются. Так все образы
 скачиваются одним шагом до `make platform` (и сразу видно, доступны ли все
 реестры), а установка чартов потом не ждёт загрузок. Образы, которые
 только упоминаются, но не запускаются (rate limit Envoy Gateway,
@@ -342,12 +416,14 @@ OOM и пустых панелей.
 
 | Симптом | Что делать |
 |---|---|
-| Развёртывание прервалось на загрузке (чарты, образы, пакеты) | короткие сбои сети переживаются повторами; после долгого обрыва просто запустите `./deploy.sh` ещё раз |
+| Развёртывание прервалось на загрузке (образы, пакеты, бинарники) | короткие сбои сети переживаются повторами; после долгого обрыва просто запустите `./deploy.sh` ещё раз |
+| Под в `ImagePullBackOff` с образом `docker.io/…` | не ответило ни одно зеркало и Docker Hub: причина — в `kubectl describe pod` и `sudo journalctl -u containerd`, список зеркал — `/etc/containerd/certs.d/docker.io/hosts.toml`; задайте доступное зеркало (`REGISTRY_MIRRORS_DOCKER_IO=… ./deploy.sh`, см. [выше](#сеть-в-рф-зеркала-и-источники)) |
+| `make platform`: `vendor/charts/… is missing` или `sha256 … pins` | версия чарта в `versions.env` и архив в `vendor/charts` разошлись: `scripts/vendor-charts.sh fetch` (сеть нужна) |
 | «kubeadm init когда-то прервался» (есть `admin.conf`, манифесты, данные etcd, но кластера нет) | автоматически не чинится: `make destroy FORCE=1`, затем `./deploy.sh` |
 | `NODE_IP` отличается от адреса кластера / узел сменил IP | `make destroy FORCE=1` и `./deploy.sh` с нужным адресом; закрепите IP в DHCP |
 | `make verify` сразу после деплоя или обновления: ✗ на шаге 7 | подождите несколько минут и повторите: цели Prometheus появляются через 1–2 интервала сбора, после обновления Prometheus может пересоздаваться |
 | Горит `FluentdBufferErrors` после простоя VictoriaLogs или перезагрузки | ожидаемо до ~10 мин; логи дозагружаются из буфера |
-| Панели логов в Grafana пустые | Grafana не скачала плагин VictoriaLogs с grafana.com (нет интернета или прокси) — логи доступны в vmui и через API |
+| Панели логов в Grafana пустые | Grafana не скачала плагин VictoriaLogs с GitHub (нет доступа или прокси; причина — в логе контейнера `grafana`, строки `victoriametrics-logs-datasource`) — логи доступны в vmui и через API, после восстановления сети — `kubectl -n monitoring rollout restart deploy/kube-prometheus-stack-grafana` |
 | `kubectl` в сессии с `HTTPS_PROXY` получает 403/таймаут | добавьте IP узла в `NO_PROXY` |
 | `vagrant up` — 404 при скачивании box | см. [«Нет Ubuntu 24.04?»](#нет-ubuntu-2404-vagrant-up) |
 | Шаг 9: реплики на одном узле после `make add-worker` | повторите `make add-worker` — он перезапустит Deployment'ы со спредом |
