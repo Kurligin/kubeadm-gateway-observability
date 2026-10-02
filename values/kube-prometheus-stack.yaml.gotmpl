@@ -165,7 +165,7 @@ grafana:
   envRenderSecret:
     HTTP_PROXY: {{ $httpProxy | quote }}
     HTTPS_PROXY: {{ $httpsProxy | quote }}
-    NO_PROXY: {{ printf "%s,%s,%s" $noProxy .Values.monitoring.namespace .Values.logging.namespace | trimPrefix "," | quote }}
+    NO_PROXY: {{ printf "%s,%s,%s,%s" $noProxy .Values.monitoring.namespace .Values.logging.namespace .Values.tracing.namespace | trimPrefix "," | quote }}
   {{- end }}
   # Admin credentials come from a Secret created on the first deploy by
   # scripts/ensure-grafana-admin.sh (random password, never in git).

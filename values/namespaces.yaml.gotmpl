@@ -43,3 +43,11 @@ namespaces:
   # the log files are root-owned (0640), but with all capabilities dropped.
   - name: {{ .Values.logging.nodeNamespace }}
     podSecurity: privileged
+  {{- if .Values.tracing.enabled }}
+  # VictoriaTraces: non-root, read-only root filesystem, no capabilities.
+  # Only with tracing on; switching it off deletes the namespace (not kept
+  # like the others: nothing but tracing lives there).
+  - name: {{ .Values.tracing.namespace }}
+    podSecurity: restricted
+    keep: false
+  {{- end }}

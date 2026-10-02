@@ -1,0 +1,78 @@
+---
+# Unit tests of the TracingNoSpans alert
+# (charts/observability-extras/templates/prometheusrule.yaml, rendered with
+# tracing enabled). Run by `make lint` (scripts/check-rules.sh).
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Requests flow and spans arrive: no alert.
+  - name: traffic with spans -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+60x30'
+      - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
+        values: '0+120x30'
+      - series: 'up{job="victoria-traces"}'
+        values: '1x30'
+    alert_rule_test:
+      - alertname: TracingNoSpans
+        eval_time: 20m
+        exp_alerts: []
+
+  # Requests flow, VictoriaTraces is up, but no span arrives (e.g. Envoy
+  # cannot reach it): the alert fires after 5 min of pending.
+  - name: traffic without spans -> TracingNoSpans
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+60x30'
+      - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
+        values: '500x30'
+      - series: 'up{job="victoria-traces"}'
+        values: '1x30'
+    promql_expr_test:
+      - expr: ALERTS{alertname="TracingNoSpans", alertstate="firing"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TracingNoSpans", alertstate="firing", severity="warning"}'
+            value: 1
+
+  # VictoriaTraces is down: its counter still has a rate from the last
+  # samples, but "up" is 0, so the alert fires as well.
+  - name: traffic, VictoriaTraces down -> TracingNoSpans
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+60x30'
+      - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
+        values: '0+120x30'
+      - series: 'up{job="victoria-traces"}'
+        values: '0x30'
+    promql_expr_test:
+      - expr: ALERTS{alertname="TracingNoSpans", alertstate="firing"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TracingNoSpans", alertstate="firing", severity="warning"}'
+            value: 1
+
+  # No application traffic, no spans: nothing to complain about. Spans of
+  # other routes (UIs) and mirror clusters do not count as traffic.
+  - name: idle -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '100x30'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2-mirror-0"}'
+        values: '0+60x30'
+      - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
+        values: '500x30'
+      - series: 'up{job="victoria-traces"}'
+        values: '1x30'
+    alert_rule_test:
+      - alertname: TracingNoSpans
+        eval_time: 20m
+        exp_alerts: []

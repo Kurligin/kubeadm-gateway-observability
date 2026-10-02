@@ -1,7 +1,7 @@
 {
   "uid": "demo-app-golden-signals",
   "title": "Demo app — golden signals",
-  "description": "Traffic, errors, latency and saturation of the demo application behind the Envoy Gateway, plus its logs.",
+  "description": "Traffic, errors, latency and saturation of the demo application behind the Envoy Gateway, plus its logs and traces.",
   "tags": [
     "demo",
     "envoy",
@@ -24,7 +24,16 @@
   "annotations": {
     "list": []
   },
-  "links": [],
+  "links": [
+    {
+      "title": "Traces (Explore)",
+      "tooltip": "Search the Gateway's traces in VictoriaTraces (only with tracing on, see README \"Трейсинг\")",
+      "type": "link",
+      "icon": "external link",
+      "targetBlank": false,
+      "url": "/explore?schemaVersion=1&panes=%7B%22traces%22%3A%7B%22datasource%22%3A%22traces%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22datasource%22%3A%7B%22type%22%3A%22jaeger%22%2C%22uid%22%3A%22traces%22%7D%2C%22queryType%22%3A%22search%22%2C%22service%22%3A%22envoy-gateway%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-1h%22%2C%22to%22%3A%22now%22%7D%7D%7D&orgId=1"
+    }
+  ],
   "panels": [
     {
       "type": "row",
@@ -1037,6 +1046,42 @@
         "y": 47,
         "w": 24,
         "h": 12
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Traced requests (Angie access log): open a record -> View trace",
+      "description": "Application requests that carried a W3C traceparent (every request through the Gateway while tracing is on). The trace_id field of a record links to its trace in VictoriaTraces (\"View trace\" in the log details); a span's \"Related logs\" leads back here. Filter one request: trace_id:=\"<id>\".",
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "editorMode": "code",
+          "expr": "{kubernetes.namespace_name=\"demo\"} kubernetes.container_name:=angie traffic:=app trace_id:~\".+\"",
+          "maxLines": 100
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
+      },
+      "id": 22,
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 24,
+        "h": 10
       }
     }
   ]

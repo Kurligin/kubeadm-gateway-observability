@@ -25,6 +25,9 @@
 {{- else if and (ne $requestedIP "") (ne $requestedIP $nodeIP) }}
 {{-   fail (printf "The cluster in the current kubeconfig was created with API server address %s, but NODE_IP=%s. A kubeadm cluster cannot change its address: drop NODE_IP, or recreate the cluster with `make destroy FORCE=1` and deploy again." $nodeIP $requestedIP) }}
 {{- end }}
+{{- /* Distributed tracing on or off: TRACING=auto|true|false, see
+       scripts/tracing-mode.sh (it fails if it cannot decide). */}}
+{{- $tracing := exec "./scripts/tracing-mode.sh" (list) | trim | eq "true" }}
 
 environments:
   default:
@@ -67,6 +70,18 @@ environments:
           # VictoriaLogs Service (fullnameOverride) and its HTTP port.
           service: victoria-logs
           port: 9428
+        # Distributed tracing: VictoriaTraces in its own namespace, spans
+        # from the Envoy proxies (OTLP/gRPC). With enabled: false nothing of
+        # it is deployed, and switching it off removes what was there.
+        tracing:
+          enabled: {{ $tracing }}
+          namespace: {{ $versions.TRACING_NAMESPACE | quote }}
+          # VictoriaTraces Service (fullnameOverride): HTTP API (Jaeger query
+          # API under /select/jaeger, metrics) and the OTLP/gRPC Service.
+          service: victoria-traces
+          port: 10428
+          otlpService: victoria-traces-otlp
+          otlpPort: 4317
         # Grafana admin credentials (Secret in the monitoring namespace).
         grafana:
           adminSecret: {{ $versions.GRAFANA_ADMIN_SECRET | quote }}
@@ -134,6 +149,21 @@ releases:
       - kube-system/cilium
     values:
       - values/namespaces.yaml.gotmpl
+    {{- if not .Values.tracing.enabled }}
+    hooks:
+      # Tracing switched off: its namespace is removed by this release.
+      # Wait until it is gone, so that switching tracing back on right
+      # away never meets a namespace that is still terminating (returns at
+      # once if it does not exist).
+      - events: ["postsync"]
+        showlogs: true
+        command: kubectl
+        args:
+          - wait
+          - --for=delete
+          - --timeout=300s
+          - {{ printf "namespace/%s" .Values.tracing.namespace | quote }}
+    {{- end }}
 
   # Default-deny ingress and explicit allow rules for the platform
   # namespaces (the demo namespace has its own, in the demo-app chart).
@@ -257,6 +287,22 @@ releases:
     values:
       - values/victoria-logs.yaml.gotmpl
 
+  # Trace storage: spans from the Envoy proxies (OTLP/gRPC), Jaeger query
+  # API for Grafana. Only with tracing on; `installed: false` uninstalls it
+  # (its volume included) when tracing is switched off, before the
+  # namespaces release removes the namespace.
+  - name: victoria-traces
+    namespace: {{ .Values.tracing.namespace }}
+    chart: vm/victoria-traces-single
+    version: {{ .Values.versions.VICTORIA_TRACES_CHART_VERSION | quote }}
+    installed: {{ .Values.tracing.enabled }}
+    disableValidationOnInstall: true
+    needs:
+      - kube-system/namespaces
+      - local-path-storage/local-path-provisioner
+    values:
+      - values/victoria-traces.yaml.gotmpl
+
   # Fluentd DaemonSet: container logs -> VictoriaLogs.
   - name: logging
     namespace: {{ .Values.logging.nodeNamespace }}
@@ -343,6 +389,9 @@ releases:
       - {{ printf "%s/gateway" .Values.gateway.namespace }}
       - {{ printf "%s/kube-prometheus-stack" .Values.monitoring.namespace }}
       - {{ printf "%s/victoria-logs" .Values.logging.namespace }}
+      {{- if .Values.tracing.enabled }}
+      - {{ printf "%s/victoria-traces" .Values.tracing.namespace }}
+      {{- end }}
     values:
       - values/ui-routes.yaml.gotmpl
     hooks:

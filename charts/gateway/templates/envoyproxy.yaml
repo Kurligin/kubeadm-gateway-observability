@@ -69,6 +69,9 @@ spec:
               upstream_host: "%UPSTREAM_HOST%"
               upstream_cluster: "%UPSTREAM_CLUSTER%"
               route: "%ROUTE_NAME%"
+              # W3C trace ID of the request (empty without tracing): links
+              # this record to its trace and to the backend's log record.
+              trace_id: "%TRACE_ID%"
           sinks:
             - type: File
               file:
@@ -77,3 +80,25 @@ spec:
     metrics:
       prometheus:
         disable: false
+    {{- with .Values.tracing }}
+    {{- if .enabled }}
+    # One span per request, exported over OTLP/gRPC. An incoming W3C
+    # "traceparent" is continued (same trace ID) and passed on to the
+    # backend with this span as the parent.
+    tracing:
+      samplingRate: {{ .samplingRate }}
+      provider:
+        type: OpenTelemetry
+        serviceName: {{ .serviceName }}
+        backendRefs:
+          - group: ""
+            kind: Service
+            name: {{ required "tracing.service is required" .service }}
+            namespace: {{ required "tracing.namespace is required" .namespace }}
+            port: {{ .port }}
+      # Span attributes (Envoy command operators): the matched route and
+      # what the backend reports about itself.
+      tags:
+        {{- toYaml .tags | nindent 8 }}
+    {{- end }}
+    {{- end }}

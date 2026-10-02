@@ -5,3 +5,9 @@ gateway:
 
 envoyProxy:
   image: {{ .Values.versions.ENVOY_PROXY_IMAGE | quote }}
+
+tracing:
+  enabled: {{ .Values.tracing.enabled }}
+  service: {{ .Values.tracing.otlpService | quote }}
+  namespace: {{ .Values.tracing.namespace | quote }}
+  port: {{ .Values.tracing.otlpPort }}

@@ -117,3 +117,21 @@ namespaces:
       - name: prometheus
         from: [prometheus]
         ports: [24231]
+  {{- if .Values.tracing.enabled }}
+
+  # VictoriaTraces: spans in from the Envoy proxies only (OTLP/gRPC);
+  # queries from Grafana and the traces UI (Gateway); metrics for
+  # Prometheus. Nothing else may write spans.
+  - name: {{ .Values.tracing.namespace | quote }}
+    allow:
+      - name: otlp-from-envoy
+        pods:
+          app.kubernetes.io/name: vt-single
+        from: [envoy]
+        ports: [{{ .Values.tracing.otlpPort }}]
+      - name: victoria-traces
+        pods:
+          app.kubernetes.io/name: vt-single
+        from: [grafana, envoy, prometheus]
+        ports: [{{ .Values.tracing.port }}]
+  {{- end }}

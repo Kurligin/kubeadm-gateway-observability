@@ -5,4 +5,7 @@ podSecurityVersion: latest
 # Namespaces owned by this chart:
 #   - name: demo
 #     podSecurity: restricted   # privileged | baseline | restricted
+#     keep: false               # optional: delete the namespace (and all
+#                               # in it) once it is dropped from this list;
+#                               # by default it is kept (resource-policy)
 namespaces: []

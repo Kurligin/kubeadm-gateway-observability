@@ -40,8 +40,9 @@ render() {
   command -v helmfile >/dev/null || die "helmfile not found (make cluster installs it)"
   local errors
   errors="$(mktemp)"
-  # KUBECONFIG=/dev/null: never look at a real cluster.
-  if ! KUBECONFIG=/dev/null NODE_IP=${PLACEHOLDER_NODE_IP} \
+  # KUBECONFIG=/dev/null: never look at a real cluster. TRACING=true: the
+  # optional tracing releases are rendered (and checked) too.
+  if ! KUBECONFIG=/dev/null NODE_IP=${PLACEHOLDER_NODE_IP} TRACING=true \
     helmfile --quiet --file helmfile.yaml.gotmpl template 2>"${errors}"; then
     cat "${errors}" >&2
     rm -f "${errors}"

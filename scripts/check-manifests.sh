@@ -45,8 +45,9 @@ die() {
 render() {
   local out=$1 errors="${work}/helmfile.log"
   log "Rendering every release (helmfile template)"
-  # KUBECONFIG=/dev/null: never look at a real cluster.
-  if ! KUBECONFIG=/dev/null NODE_IP=${PLACEHOLDER_NODE_IP} \
+  # KUBECONFIG=/dev/null: never look at a real cluster. TRACING=true: the
+  # optional tracing releases are rendered (and checked) too.
+  if ! KUBECONFIG=/dev/null NODE_IP=${PLACEHOLDER_NODE_IP} TRACING=true \
     helmfile --quiet --file helmfile.yaml.gotmpl template --output-dir "${out}" \
     --output-dir-template '{{ .OutputDir }}/{{ .Release.Name }}' >/dev/null 2>"${errors}"; then
     cat "${errors}" >&2

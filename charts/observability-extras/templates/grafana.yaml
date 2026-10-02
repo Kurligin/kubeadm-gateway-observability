@@ -36,3 +36,52 @@ data:
         url: {{ required "victoriaLogs.url is required" .Values.victoriaLogs.url | quote }}
         isDefault: false
         editable: false
+        {{- if .Values.tracing.enabled }}
+        jsonData:
+          # Log -> trace: records with a trace_id field (Angie and Envoy
+          # access logs) get a "View trace" link to the traces datasource.
+          derivedFields:
+            - name: trace_id
+              matcherType: label
+              matcherRegex: trace_id
+              # "$$" keeps Grafana from expanding it as an environment variable.
+              url: "$${__value.raw}"
+              urlDisplayLabel: View trace
+              datasourceUid: {{ .Values.tracing.datasourceUid | quote }}
+        {{- end }}
+{{- if .Values.tracing.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datasource-traces
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+data:
+  traces.yaml: |-
+    apiVersion: 1
+    # prune: once this file is gone (tracing switched off), Grafana deletes
+    # the datasource on its next provisioning reload.
+    prune: true
+    datasources:
+      # VictoriaTraces through its Jaeger query API (built-in Jaeger
+      # datasource of Grafana).
+      - name: Traces
+        type: jaeger
+        uid: {{ .Values.tracing.datasourceUid | quote }}
+        access: proxy
+        url: {{ required "tracing.url is required" .Values.tracing.url | quote }}
+        isDefault: false
+        editable: false
+        jsonData:
+          # Trace -> logs: "Related logs" of a span opens the VictoriaLogs
+          # records with the same trace_id (Envoy and Angie access logs).
+          tracesToLogsV2:
+            datasourceUid: victorialogs
+            filterByTraceID: true
+            filterBySpanID: false
+            spanStartTimeShift: "-1m"
+            spanEndTimeShift: "1m"
+{{- end }}

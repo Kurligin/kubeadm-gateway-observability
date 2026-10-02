@@ -4,7 +4,8 @@
 #   ./deploy.sh                    bootstrap tooling, then `make deploy`
 #   ./deploy.sh --bootstrap-only   only prepare .venv with Ansible
 #
-# Extra environment variables (NODE_IP, INVENTORY, ...) are passed to make.
+# Extra environment variables (NODE_IP, INVENTORY, TRACING=auto|true|false,
+# ...) are passed to make.
 # Behind an HTTP(S) proxy, set HTTP_PROXY / HTTPS_PROXY (and NO_PROXY if
 # needed) for every run; without them nothing proxy-related is configured.
 # Safe to run repeatedly: every step checks the current state first.
@@ -140,7 +141,7 @@ main() {
     --bootstrap-only) bootstrap_only=true ;;
     "") ;;
     -h | --help)
-      sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       return
       ;;
     *) die "unknown argument: $1 (see --help)" ;;

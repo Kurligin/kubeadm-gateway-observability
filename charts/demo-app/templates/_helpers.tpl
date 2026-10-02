@@ -37,6 +37,17 @@ http {
     uwsgi_temp_path /var/cache/angie/uwsgi_temp;
     scgi_temp_path /var/cache/angie/scgi_temp;
 
+    # W3C trace context: the trace ID of "traceparent"
+    # (version-traceid-parentid-flags), set by the gateway's tracing.
+    # Logged as trace_id, the same field the gateway's access log and
+    # Grafana's trace-to-logs links use. Only for sampled traces (flag bit
+    # 0 set, i.e. an odd last digit): an unsampled trace is never stored,
+    # so its ID would lead nowhere. Empty without a valid header.
+    map $http_traceparent $trace_id {
+        "~^[0-9a-f]{2}-(?<tid>[0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f][13579bdf]$" $tid;
+        default "";
+    }
+
     # One JSON object per line; x_request_id is set by the gateway.
     log_format json_access escape=json '{'
         '"time":"$time_iso8601",'
@@ -47,6 +58,7 @@ http {
         '"remote_addr":"$remote_addr",'
         '"x_forwarded_for":"$http_x_forwarded_for",'
         '"x_request_id":"$http_x_request_id",'
+        '"trace_id":"$trace_id",'
         '"user_agent":"$http_user_agent",'
         '"bytes":$body_bytes_sent,'
         '"host":"$host",'
@@ -86,6 +98,9 @@ http {
         # Internal detail for operators; the gateway removes it from the
         # responses it sends to clients (ResponseHeaderModifier).
         add_header X-Backend-Pod $hostname always;
+        # Version of this backend; the gateway records it in its trace span
+        # (tag backend.version).
+        add_header X-App-Version {{ .item.version }} always;
 
         location = /healthz {
             access_log off;
@@ -99,6 +114,8 @@ http {
         # Failure on demand, for checking error logs and 5xx alerting: the
         # upstream is unreachable, so Angie answers 502 and writes an
         # "[error] ... connect() failed" line to its error log (stderr).
+        # Like any proxied request, it would pass the request headers
+        # (traceparent included) on to the upstream unchanged.
         location = /broken {
             proxy_pass http://127.0.0.1:{{ .root.Values.brokenUpstreamPort }};
         }

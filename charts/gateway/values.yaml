@@ -44,6 +44,32 @@ envoyProxy:
     limits:
       memory: 512Mi
 
+# Distributed tracing of the proxies (spans to an OTLP/gRPC collector).
+# Off by default; helmfile turns it on together with VictoriaTraces.
+tracing:
+  enabled: false
+  # Share of requests traced, percent. Every request is traced here: the
+  # demo has little traffic, and `make verify` must find its own request.
+  # Under real load 1-10 % keeps the overhead and the storage small (an
+  # incoming sampled "traceparent" is honoured either way).
+  samplingRate: 100
+  # service.name of the spans.
+  serviceName: envoy-gateway
+  # OTLP/gRPC Service (appProtocol: grpc) of the trace storage.
+  service: ""
+  namespace: ""
+  port: 4317
+  tags:
+    # Envoy route of the request (httproute/<ns>/<route>/rule/<n>/...).
+    gateway.route: "%ROUTE_NAME%"
+    # Rule name the route writes into X-Gateway-Route (weighted, path-v2, ...).
+    gateway.rule: "%REQ(X-GATEWAY-ROUTE)%"
+    # Version of the backend that answered (Angie response header; a header
+    # the route removes from the response is gone before the span is
+    # finished, so this one is passed on to the client). The upstream span
+    # carries the pod address (upstream_address) by itself.
+    backend.version: "%RESP(X-APP-VERSION)%"
+
 gateway:
   name: public
   tls:

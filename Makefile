@@ -26,6 +26,11 @@ WORKER_INVENTORY := ansible/inventory/worker.yml
 NODES_INVENTORY = $(if $(strip $(WORKER)),$(WORKER_INVENTORY),$(INVENTORY))
 ANSIBLE_ARGS ?=
 HELMFILE_ARGS ?=
+# Distributed tracing (VictoriaTraces + Envoy spans): auto (on if the control
+# plane has >= TRACING_AUTO_MIN_MEMORY_MIB of memory), true or false. Read by
+# helmfile through scripts/tracing-mode.sh.
+TRACING ?= auto
+export TRACING
 # Parallel helm processes (diff and upgrade). Unlimited parallelism (the
 # helmfile default) overloads the API server of a 2 vCPU node on re-deploy
 # (14 diffs at once -> "TLS handshake timeout"); one per CPU is safe.
@@ -114,6 +119,7 @@ help: ## Show this help
 	@printf '  WORKER=<address>  worker for add-worker / remove-worker (WORKER_USER, SSH_KEY: login over SSH)\n'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
+	@printf '  TRACING=auto|true|false  distributed tracing; auto: on if the control plane has >= %s MiB\n' '$(TRACING_AUTO_MIN_MEMORY_MIB)'
 	@printf '  FORCE=1           confirm `make destroy` (and `make remove-worker` of a whole INVENTORY)\n'
 
 deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
@@ -122,7 +128,7 @@ deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
 	@printf '\n\033[1;32mDeployed.\033[0m Next:\n'
 	@printf '  make verify   end-to-end check of the Gateway, metrics, logs and alerts\n'
 	@printf '  make status   node, versions, addresses, releases, health\n'
-	@printf '  make ui       UI addresses (Grafana, Prometheus, Alertmanager, logs) and their passwords\n'
+	@printf '  make ui       UI addresses (Grafana, Prometheus, Alertmanager, logs, traces) and their passwords\n'
 	@printf '  make ca       demo CA certificate for curl --cacert / the browser\n'
 
 cluster: $(ANSIBLE_PLAYBOOK) ## Prepare the node and bootstrap kubeadm (Ansible only)
@@ -157,6 +163,7 @@ remove-worker: $(ANSIBLE_PLAYBOOK) ## Drain, delete and reset a worker node: WOR
 # the case for a release left "failed" by the previous attempt.
 platform: ## Install or update cluster add-ons (helmfile only)
 	@command -v helmfile >/dev/null || { echo "helmfile not found: run 'make cluster' first" >&2; exit 1; }
+	@mode="$$(./scripts/tracing-mode.sh --explain)"; echo "==> tracing: $$mode"
 	@for attempt in 1 2 3 4 5; do \
 		$(HELMFILE) repos && break; \
 		[[ $$attempt -lt 5 ]] || exit 1; \
@@ -185,7 +192,8 @@ ui: ## Show observability UI addresses and their credentials
 	server="$$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; server="$${server#https://}"; server="$${server%:*}"; \
 	if grep -qxF "$$server" <<<"$$addresses"; then ip="$$server"; else ip="$$(head -n1 <<<"$$addresses")"; fi; \
 	secret() { kubectl -n "$$1" get secret "$$2" -o jsonpath="{.data.$$3}" | base64 -d; }; \
-	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local"\n' "$$ip"; \
+	traces=; if kubectl get namespace $(TRACING_NAMESPACE) >/dev/null 2>&1; then traces=' traces.demo.local'; fi; \
+	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local%s"\n' "$$ip" "$$traces"; \
 	printf 'to /etc/hosts, or use curl --resolve; the certificate is issued by the demo CA, see `make ca`):\n\n'; \
 	printf '  Grafana       https://grafana.demo.local       user %s, password %s\n' \
 		"$$(secret $(MONITORING_NAMESPACE) $(GRAFANA_ADMIN_SECRET) admin-user)" \
@@ -194,7 +202,10 @@ ui: ## Show observability UI addresses and their credentials
 	ba_pass="$$(secret $(GATEWAY_NAMESPACE) $(BASIC_AUTH_SECRET) password)"; \
 	printf '  Prometheus    https://prometheus.demo.local    basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
 	printf '  Alertmanager  https://alertmanager.demo.local  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
-	printf '  Logs (vmui)   https://logs.demo.local/select/vmui/  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"
+	printf '  Logs (vmui)   https://logs.demo.local/select/vmui/  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
+	if [[ -n "$$traces" ]]; then \
+		printf '  Traces (UI)   https://traces.demo.local/select/vmui/  basic auth %s / %s (in Grafana: Explore -> Traces)\n' "$$ba_user" "$$ba_pass"; \
+	fi
 
 ca: ## Export the demo root CA certificate to $(CA_FILE) (for curl --cacert)
 	@kubectl -n $(CA_NAMESPACE) get secret $(CA_SECRET) -o jsonpath='{.data.ca\.crt}' | base64 -d >'$(CA_FILE).tmp'

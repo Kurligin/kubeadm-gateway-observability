@@ -15,3 +15,9 @@ victoriaLogs:
   url: {{ printf "http://%s.%s.svc:%v" .Values.logging.service .Values.logging.namespace .Values.logging.port | quote }}
   job: {{ .Values.logging.service | quote }}
   namespace: {{ .Values.logging.namespace | quote }}
+
+tracing:
+  enabled: {{ .Values.tracing.enabled }}
+  url: {{ printf "http://%s.%s.svc:%v/select/jaeger" .Values.tracing.service .Values.tracing.namespace .Values.tracing.port | quote }}
+  job: {{ .Values.tracing.service | quote }}
+  namespace: {{ .Values.tracing.namespace | quote }}

@@ -22,9 +22,13 @@
 #                deploy: pods, Prometheus targets (default: 300)
 #   ENVOY_REPLICAS  Envoy replicas of the Gateway (default: from the
 #                cluster, else 2), for the rate limit check
+#   GRAFANA_USER, GRAFANA_PASSWORD  Grafana login for the tracing check
+#                (default: Secret monitoring/grafana-admin)
 #
 # With worker nodes (`make add-worker`), step 9 checks every node; on a
-# single node it is skipped.
+# single node it is skipped. Step 10 (tracing) is skipped when tracing is
+# off (TRACING=false, or TRACING=auto on a control plane with little
+# memory, see scripts/tracing-mode.sh).
 #
 # Every request goes straight to the Gateway, never through an HTTP proxy
 # that may be set in the environment.
@@ -63,10 +67,22 @@ readonly LOG_TIMEOUT=45
 # fresh cluster the first one takes a minute or two after Prometheus starts.
 readonly ALERT_WINDOW=10m
 readonly ALERT_TIMEOUT=240
-# Prometheus jobs that must be up (every target of each).
-readonly KEY_JOBS=(apiserver kubelet kube-controller-manager kube-scheduler etcd-metrics
+# Prometheus jobs that must be up (every target of each); victoria-traces
+# is added when tracing is on.
+KEY_JOBS=(apiserver kubelet kube-controller-manager kube-scheduler etcd-metrics
   coredns node-exporter kube-state-metrics cilium-agent envoy envoy-gateway
   web-v1 web-v2 fluentd victoria-logs)
+# Tracing: namespace and Deployment of VictoriaTraces, how long a trace may
+# take to become searchable (Envoy flushes spans every 5 s, VictoriaTraces
+# hides the newest 10 s), service.name of the Gateway's spans and the
+# Grafana datasources that link logs and traces.
+readonly TRACING_NAMESPACE=tracing
+readonly TRACING_DEPLOYMENT=victoria-traces
+readonly TRACE_TIMEOUT=60
+readonly TRACE_SERVICE=envoy-gateway
+readonly TRACES_DATASOURCE=traces
+readonly LOGS_DATASOURCE=victorialogs
+readonly GRAFANA_ADMIN_SECRET=grafana-admin
 # Envoy clusters of the application route (not app-limited).
 readonly APP_CLUSTERS="httproute/${GATEWAY_NAMESPACE}/app/rule/[0-9]+"
 
@@ -923,6 +939,126 @@ check_worker_metrics() {
   reason="node-exporter and kubelet up on ${details}"
 }
 
+# --- 10. Tracing ---------------------------------------------------------------
+
+# "on", "off" or "unknown", set by setup(); the reason when off.
+tracing_state=""
+tracing_reason=""
+# W3C trace ID of the request sent by check_trace.
+trace_id=""
+
+# tracing: 0 if tracing is deployed; otherwise sets $reason and returns 2.
+tracing() {
+  case ${tracing_state} in
+    on) return 0 ;;
+    off) reason=${tracing_reason} ;;
+    *) reason="cannot tell whether tracing is deployed (no kubectl access and no UI_PASSWORD)" ;;
+  esac
+  return 2
+}
+
+# traces_get <path> <curl args...>: VictoriaTraces API through the Gateway.
+traces_get() {
+  local path=$1
+  shift
+  ui_get traces "${path}" "$@"
+}
+
+# random_hex <bytes>: lower-case hex string.
+random_hex() {
+  od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# A request with a known W3C "traceparent" goes through the Gateway; Envoy
+# continues that trace, so VictoriaTraces must return a trace with exactly
+# this ID (Jaeger query API) holding the Gateway's span of the application
+# route, tagged with the route and the version of the backend that answered.
+check_trace() {
+  tracing || return
+  [[ -n ${UI_PASSWORD} ]] || {
+    reason="UI_PASSWORD not set (no kubectl access to read it)"
+    return 2
+  }
+  local start spans summary
+  trace_id="$(random_hex 16)"
+  start=${SECONDS}
+  https app -o /dev/null -H "traceparent: 00-${trace_id}-$(random_hex 8)-01" \
+    "https://app.${DOMAIN}/" 2>/dev/null || true
+  while true; do
+    # Spans of the Gateway: operation, route tag, backend.version tag.
+    # shellcheck disable=SC2016 # jq variables
+    spans="$(traces_get "/select/jaeger/api/traces/${trace_id}" 2>/dev/null | jq -c --arg svc "${TRACE_SERVICE}" '
+      [.data[0] as $t | $t.spans[]? | select($t.processes[.processID].serviceName == $svc)
+        | {op: .operationName,
+           route: ([.tags[] | select(.key == "gateway.route") | .value] | first),
+           version: ([.tags[] | select(.key == "backend.version") | .value] | first)}]' 2>/dev/null || true)"
+    summary="$(jq -r --arg ns "${GATEWAY_NAMESPACE}" '[.[] | select((.route // "") | startswith("httproute/\($ns)/app/")) | select(.version == "v1" or .version == "v2")] | first // empty
+      | "route \(.route), backend.version=\(.version)"' <<<"${spans:-[]}" 2>/dev/null || true)"
+    if [[ -n ${summary} ]]; then
+      reason="trace ${trace_id}: $(jq 'length' <<<"${spans}") spans of ${TRACE_SERVICE} after $((SECONDS - start)) s; ${summary}"
+      return 0
+    fi
+    if [[ $((SECONDS - start)) -ge ${TRACE_TIMEOUT} ]]; then
+      reason="trace ${trace_id}: no span of ${TRACE_SERVICE} with the app route and backend version after ${TRACE_TIMEOUT} s (got: ${spans:-nothing})"
+      return 1
+    fi
+    sleep 3
+  done
+}
+
+# The same trace ID reached Angie (traceparent passed on by Envoy) and is in
+# its access log in VictoriaLogs: log <-> trace correlation.
+check_trace_log() {
+  tracing || return
+  [[ -n ${UI_PASSWORD} && -n ${trace_id} ]] || {
+    reason="no traced request (previous check skipped)"
+    return 2
+  }
+  local records versions
+  records="$(ui_get logs /select/logsql/query \
+    --data-urlencode "query=trace_id:=\"${trace_id}\" kubernetes.container_name:=angie" 2>/dev/null || true)"
+  versions="$(jq -r 'select(.traffic != "shadow") | .version' <<<"${records}" 2>/dev/null | sort -u | xargs || true)"
+  if [[ -z ${versions} ]]; then
+    reason="trace_id ${trace_id}: no Angie access log record in VictoriaLogs yet"
+    return 1
+  fi
+  reason="trace_id ${trace_id} in the Angie access log (version ${versions}) and in the trace"
+}
+
+# Grafana: the traces datasource returns the trace by its ID, and the
+# datasources link both ways (VictoriaLogs derived field trace_id -> traces,
+# traces "Related logs" -> VictoriaLogs).
+check_grafana_traces() {
+  tracing || return
+  [[ -n ${trace_id} ]] || {
+    reason="no traced request (previous check skipped)"
+    return 2
+  }
+  local user=${GRAFANA_USER:-} password=${GRAFANA_PASSWORD:-} body spans derived related
+  if [[ -z ${password} ]] && have_kubectl; then
+    user="$(kubectl -n monitoring get secret "${GRAFANA_ADMIN_SECRET}" -o jsonpath='{.data.admin-user}' 2>/dev/null | base64 -d || true)"
+    password="$(kubectl -n monitoring get secret "${GRAFANA_ADMIN_SECRET}" -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d || true)"
+  fi
+  [[ -n ${password} ]] || {
+    reason="GRAFANA_PASSWORD not set (no kubectl access to read it)"
+    return 2
+  }
+  grafana() {
+    https grafana -u "${user:-admin}:${password}" "$@"
+  }
+  body="$(printf '{"queries":[{"refId":"A","datasource":{"type":"jaeger","uid":"%s"},"query":"%s"}],"from":"now-1h","to":"now"}' \
+    "${TRACES_DATASOURCE}" "${trace_id}")"
+  spans="$(grafana -H 'Content-Type: application/json' -X POST --data "${body}" \
+    "https://grafana.${DOMAIN}/api/ds/query" 2>/dev/null |
+    jq -r '.results.A.frames[0].data.values[0] // [] | length' 2>/dev/null || true)"
+  derived="$(grafana "https://grafana.${DOMAIN}/api/datasources/uid/${LOGS_DATASOURCE}" 2>/dev/null |
+    jq -r '[.jsonData.derivedFields[]? | select(.matcherRegex == "trace_id") | .datasourceUid] | first // empty' 2>/dev/null || true)"
+  related="$(grafana "https://grafana.${DOMAIN}/api/datasources/uid/${TRACES_DATASOURCE}" 2>/dev/null |
+    jq -r '.jsonData.tracesToLogsV2.datasourceUid // empty' 2>/dev/null || true)"
+  reason="trace ${trace_id} via datasource \"${TRACES_DATASOURCE}\": ${spans:-0} spans; logs -> trace: ${derived:-no link}; trace -> logs: ${related:-no link}"
+  [[ ${spans:-0} -gt 0 && ${derived} == "${TRACES_DATASOURCE}" && ${related} == "${LOGS_DATASOURCE}" ]]
+}
+
 # --- Main ---------------------------------------------------------------------
 
 setup() {
@@ -979,6 +1115,30 @@ setup() {
   fi
   ENVOY_REPLICAS=${ENVOY_REPLICAS:-2}
   readonly GATEWAY_IP CA_FILE UI_PASSWORD ENVOY_REPLICAS
+
+  # Tracing deployed? From the cluster if possible, else from the traces
+  # UI route (it exists only with tracing on).
+  local code
+  if [[ ${kube} == true ]]; then
+    if kubectl -n "${TRACING_NAMESPACE}" get deployment "${TRACING_DEPLOYMENT}" >/dev/null 2>&1 ||
+      kubectl get namespace "${TRACING_NAMESPACE}" >/dev/null 2>&1; then
+      tracing_state=on
+    else
+      tracing_state=off
+    fi
+  elif [[ -n ${UI_PASSWORD} ]]; then
+    code="$(ui_get traces /select/jaeger/api/services -o /dev/null -w '%{http_code}' 2>/dev/null || true)"
+    case ${code} in
+      200) tracing_state=on ;;
+      404) tracing_state=off ;;
+      *) tracing_state=unknown ;;
+    esac
+  fi
+  tracing_reason="tracing is off (TRACING=false, or TRACING=auto and the control plane has little memory; see \`make status\`)"
+  if [[ ${tracing_state} == on ]]; then
+    KEY_JOBS+=(victoria-traces)
+  fi
+  readonly KEY_JOBS tracing_state tracing_reason
 }
 
 main() {
@@ -1030,6 +1190,13 @@ main() {
     check 9 "Nodes: node-exporter, kubelet up per node" check_worker_metrics 120
   else
     result 9 "Several nodes" skip "${reason}"
+  fi
+  if tracing; then
+    check 10 "Tracing: trace by traceparent (<= ${TRACE_TIMEOUT} s)" check_trace
+    check 10 "Tracing: trace_id in the Angie access log" check_trace_log "${LOG_TIMEOUT}"
+    check 10 "Tracing: Grafana trace by ID, log <-> trace" check_grafana_traces 60
+  else
+    result 10 "Tracing" skip "${reason}"
   fi
 
   printf '\nPassed: %d, failed: %d, skipped: %d\n' "${passed}" "${failed}" "${skipped}"

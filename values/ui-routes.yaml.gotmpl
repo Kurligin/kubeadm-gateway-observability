@@ -52,3 +52,17 @@ routes:
         pathPrefix: /select
       - method: POST
         pathPrefix: /select
+  {{- if .Values.tracing.enabled }}
+  # VictoriaTraces: its UI and the query APIs (Jaeger, LogsQL) under
+  # /select/; spans are written over OTLP/gRPC inside the cluster only.
+  - host: traces
+    namespace: {{ .Values.tracing.namespace | quote }}
+    service: {{ .Values.tracing.service | quote }}
+    port: {{ .Values.tracing.port }}
+    basicAuth: true
+    allow:
+      - method: GET
+        pathPrefix: /select
+      - method: POST
+        pathPrefix: /select
+  {{- end }}

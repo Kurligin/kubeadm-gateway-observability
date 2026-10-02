@@ -7,7 +7,8 @@ set -euo pipefail
 readonly DOMAIN=${DOMAIN:-demo.local}
 readonly GATEWAY_NAMESPACE=gateway
 readonly GATEWAY_NAME=public
-readonly UI_HOSTS=(app grafana prometheus alertmanager logs)
+readonly TRACING_NAMESPACE=tracing
+UI_HOSTS=(app grafana prometheus alertmanager logs)
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -51,12 +52,25 @@ main() {
   programmed="$(jq -r '[.status.conditions[]? | select(.type == "Programmed")][0].status // "unknown"' <<<"${gw}")"
   printf '  %s/%s  address %s  Programmed=%s\n' "${GATEWAY_NAMESPACE}" "${GATEWAY_NAME}" "${addresses:-none}" "${programmed}"
 
+  section "Tracing"
+  # What is deployed now, and what the next deploy would do with the
+  # current environment (TRACING=auto|true|false).
+  local deployed next
+  deployed=off
+  if kubectl get namespace "${TRACING_NAMESPACE}" >/dev/null 2>&1; then
+    deployed=on
+    UI_HOSTS+=(traces)
+  fi
+  next="$("$(dirname "${BASH_SOURCE[0]}")/tracing-mode.sh" --explain 2>&1 || true)"
+  printf '  deployed: %s; next deploy: %s\n' "${deployed}" "${next}"
+
   section "Addresses (HTTPS, certificate of the demo CA)"
   local host
   for host in "${UI_HOSTS[@]}"; do
     case ${host} in
       app) printf '  %-13s https://%s.%s/\n' "application" "${host}" "${DOMAIN}" ;;
       logs) printf '  %-13s https://%s.%s/select/vmui/\n' "logs (vmui)" "${host}" "${DOMAIN}" ;;
+      traces) printf '  %-13s https://%s.%s/select/vmui/\n' "traces (UI)" "${host}" "${DOMAIN}" ;;
       *) printf '  %-13s https://%s.%s/\n' "${host}" "${host}" "${DOMAIN}" ;;
     esac
   done
@@ -65,7 +79,7 @@ main() {
   for host in "${UI_HOSTS[@]}"; do printf ' %s.%s' "${host}" "${DOMAIN}"; done
   printf '\n  or use curl --resolve app.%s:443:%s\n' "${DOMAIN}" "${ip:-<node IP>}"
   printf '  CA certificate for curl --cacert / the browser: make ca (writes ca.crt)\n'
-  printf '  Passwords (Grafana, basic auth of Prometheus/Alertmanager/logs): make ui\n'
+  printf '  Passwords (Grafana, basic auth of Prometheus/Alertmanager/logs/traces): make ui\n'
 
   section "Helm releases"
   if command -v helm >/dev/null; then

@@ -1,0 +1,96 @@
+# VictoriaTraces single node: spans from the Envoy proxies of the Gateway
+# (OTLP/gRPC), Jaeger query API for Grafana (/select/jaeger) and the
+# traces UI (published through the Gateway as traces.<domain>).
+{{- $t := .Values.tracing }}
+server:
+  fullnameOverride: {{ $t.service | quote }}
+  image:
+    # quay.io: the same image without Docker Hub's anonymous pull limit.
+    registry: quay.io
+    # tag@digest (the chart strips the digest for its version label).
+    tag: {{ printf "v%s@%s" .Values.versions.VICTORIA_TRACES_VERSION .Values.versions.VICTORIA_TRACES_DIGEST | quote }}
+  # A Deployment with a PVC rendered by the chart (not a StatefulSet
+  # volume claim template): uninstalling the release, which is what
+  # switching tracing off does, removes the volume and its data too.
+  mode: deployment
+  # Regular ClusterIP Service (the chart default is headless).
+  service:
+    clusterIP: ""
+  extraArgs:
+    envflag.enable: true
+    envflag.prefix: VM_
+    loggerFormat: json
+    http.shutdownDelay: 15s
+    # OTLP over gRPC, the protocol Envoy's OpenTelemetry tracer speaks.
+    otlpGRPCListenAddr: {{ printf ":%v" $t.otlpPort | quote }}
+    # Plain gRPC inside the cluster (TLS is on by default and needs a
+    # certificate), like Fluentd -> VictoriaLogs: the NetworkPolicy of the
+    # namespace lets only the Envoy proxies reach this port.
+    otlpGRPC.tls: false
+    # The query APIs hide the newest spans for this long, so that a trace
+    # is not shown while its spans are still arriving. Envoy flushes its
+    # spans every 5 s; the default (30 s) only slows the demo down.
+    search.latencyOffset: 10s
+  # Three days of traces, never more than 1 GiB on disk (the oldest days are
+  # dropped first): every request through the Gateway is traced.
+  retentionPeriod: 3d
+  retentionDiskSpaceUsage: 1
+  persistentVolume:
+    enabled: true
+    storageClassName: local-path
+    size: 2Gi
+  # The volume (local-path) is tied to the node the pod first ran on. The
+  # control plane is the node that is always there (`make remove-worker`
+  # refuses to remove a node with such a volume), as for Prometheus and
+  # VictoriaLogs, which are installed before any worker joins.
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 256Mi
+  # Pod Security "restricted": non-root, no capabilities, seccomp.
+  podSecurityContext:
+    enabled: true
+    fsGroup: 2000
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 2000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  serviceMonitor:
+    enabled: {{ .Values.serviceMonitors }}
+
+extraObjects:
+  # OTLP/gRPC for the Envoy proxies. The chart's own Service has the port
+  # too, but without appProtocol; Envoy Gateway needs "grpc" there to talk
+  # HTTP/2 to it (with HTTP/1.1 every export fails).
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: {{ $t.otlpService | quote }}
+      namespace: {{ $t.namespace | quote }}
+      labels:
+        app.kubernetes.io/name: {{ $t.otlpService | quote }}
+        app.kubernetes.io/part-of: victoria-traces
+    spec:
+      type: ClusterIP
+      selector:
+        app: server
+        app.kubernetes.io/instance: victoria-traces
+        app.kubernetes.io/name: vt-single
+      ports:
+        - name: otlp-grpc
+          port: {{ $t.otlpPort }}
+          targetPort: otlpgrpc-tcp
+          protocol: TCP
+          appProtocol: grpc

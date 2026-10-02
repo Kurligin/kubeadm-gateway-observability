@@ -31,6 +31,19 @@ victoriaLogs:
   job: victoria-logs
   namespace: logging
 
+# Distributed tracing (VictoriaTraces): Grafana datasource (Jaeger query
+# API), log <-> trace links and the TracingNoSpans alert. Off by default;
+# helmfile turns it on together with VictoriaTraces.
+tracing:
+  enabled: false
+  # Required with tracing, e.g.
+  # http://victoria-traces.tracing.svc:10428/select/jaeger
+  url: ""
+  datasourceUid: traces
+  # Prometheus job of VictoriaTraces.
+  job: victoria-traces
+  namespace: tracing
+
 # Webhook receiver of Alertmanager (files/alert_receiver.py): writes every
 # alert it gets as one JSON line to stdout, so alerts end up in VictoriaLogs
 # like any other log. Alertmanager sends it every alert (Watchdog

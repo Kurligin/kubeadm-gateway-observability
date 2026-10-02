@@ -30,8 +30,10 @@ main() {
   # shellcheck disable=SC2064 # expand the path now
   trap "rm -rf '${work}'" EXIT
 
+  # Tracing on: its rules are rendered and tested too.
   helm template rules "${CHART}" --set victoriaLogs.url=http://victoria-logs:9428 \
-    --set alertReceiver.image=lint |
+    --set alertReceiver.image=lint --set tracing.enabled=true \
+    --set tracing.url=http://victoria-traces:10428/select/jaeger |
     "${python}" -c '
 import sys
 import yaml

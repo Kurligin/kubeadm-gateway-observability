@@ -177,6 +177,38 @@ spec:
               Only {{ "{{ $value | printf \"%.0f\" }}" }}% of the VictoriaLogs output buffer of
               {{ "{{ $labels.pod }}" }} is free; when it is full, the oldest logs are dropped.
 
+    {{- if .Values.tracing.enabled }}
+
+    # --- Distributed tracing ---
+    # Judged by the receiving side, like FluentdNoOutput: every request is
+    # traced (sampling 100 %), so application traffic through the Gateway
+    # must come with spans arriving at VictoriaTraces. The "up" term makes
+    # it pending at once when VictoriaTraces is down.
+    - name: tracing
+      rules:
+        - alert: TracingNoSpans
+          expr: |
+            (sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m])) > 0)
+            unless on ()
+            (
+              (sum(rate(vt_rows_ingested_total{job="{{ .Values.tracing.job }}", type=~"opentelemetry_traces_.*"}[5m])) > 0)
+              and on ()
+              (sum(up{job="{{ .Values.tracing.job }}"}) > 0)
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Requests pass the Gateway, but VictoriaTraces receives no spans"
+            description: >-
+              The application gets requests through the Gateway, but VictoriaTraces has
+              not ingested a single span for 5 minutes (or is not running): traces of
+              these requests are lost (Envoy keeps only a small buffer). Check
+              `kubectl -n {{ .Values.tracing.namespace }} get pods`, the EnvoyProxy status
+              (`kubectl -n {{ .Values.envoyGateway.namespace }} get envoyproxy -o yaml`) and the Envoy
+              statistics of the "tracing" cluster.
+    {{- end }}
+
     # --- Control plane ---
     # API server, controller-manager and scheduler are covered by the
     # standard rules of kube-prometheus-stack (KubeAPIDown,
