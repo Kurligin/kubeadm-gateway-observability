@@ -123,7 +123,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", envoy_response_code_class=\"5\"}[$__rate_interval])) or vector(0)) / sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__rate_interval]))",
+          "expr": "(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", envoy_response_code_class=\"5\"}[$__rate_interval])) or vector(0)) / (sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__rate_interval])) > 0)",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -261,7 +261,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\", version=\"v2\"}[$__rate_interval])) / sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval]))",
+          "expr": "sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\", version=\"v2\"}[$__rate_interval])) / (sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval])) > 0)",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -532,7 +532,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (version) (rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval]))",
+          "expr": "sum by (version) (rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval])) / ignoring (version) group_left () (sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval])) > 0)",
           "legendFormat": "{{version}}",
           "refId": "A",
           "range": true
@@ -540,22 +540,23 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
+          "unit": "percentunit",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 25,
             "showPoints": "never",
-            "spanNulls": true,
+            "spanNulls": false,
             "stacking": {
-              "mode": "percent",
+              "mode": "normal",
               "group": "A"
             }
           },
           "color": {
             "mode": "palette-classic"
           },
-          "min": 0
+          "min": 0,
+          "max": 1
         },
         "overrides": []
       },
@@ -958,11 +959,13 @@
     {
       "type": "timeseries",
       "title": "Log lines / min: access vs error",
-      "description": "Lines of the demo application collected by Fluentd, by log type.",
+      "description": "Lines of the demo application collected by Fluentd, by log type (mirrored copies included). One bar per minute up to a 24 h range, wider buckets beyond.",
       "datasource": {
         "type": "victoriametrics-logs-datasource",
         "uid": "victorialogs"
       },
+      "interval": "1m",
+      "maxDataPoints": 1440,
       "targets": [
         {
           "datasource": {
@@ -973,8 +976,7 @@
           "queryType": "statsRange",
           "editorMode": "code",
           "expr": "{kubernetes.namespace_name=\"demo\"} | stats by (log_type) count() lines",
-          "legendFormat": "{{log_type}}",
-          "step": "1m"
+          "legendFormat": "{{log_type}}"
         }
       ],
       "fieldConfig": {

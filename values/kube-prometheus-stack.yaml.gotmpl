@@ -194,12 +194,16 @@ grafana:
       # stays unavailable; logs remain visible in vmui).
       preinstall: {{ printf "victoriametrics-logs-datasource@%s" .Values.versions.GRAFANA_VICTORIALOGS_PLUGIN_VERSION | quote }}
       preinstall_async: true
+  # Grafana 13 idles at ~450 MiB; with a 512 MiB limit (GOMEMLIMIT is set
+  # to 90 % of it by the chart) opening a dashboard pushed it into GC
+  # thrashing, failed health checks and OOM kills, and every panel went
+  # blank. The limit only caps the pod, the request stays as it was.
   resources:
     requests:
       cpu: 50m
       memory: 192Mi
     limits:
-      memory: 512Mi
+      memory: 768Mi
   sidecar:
     image:
       tag: {{ $tag.GRAFANA_SIDECAR_IMAGE | quote }}
