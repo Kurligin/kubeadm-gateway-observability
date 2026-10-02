@@ -55,7 +55,8 @@
           "expr": "1 - ((sum(increase(envoy_app:upstream_rq_5xx_total:filled[$__range])) or vector(0)) / sum(increase(envoy_app:upstream_rq_total:filled[$__range])))",
           "legendFormat": "",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -87,7 +88,7 @@
           "values": false
         },
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "textMode": "value",
         "justifyMode": "auto",
         "orientation": "auto"
@@ -446,7 +447,8 @@
           "expr": "sum(increase(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", le=\"250.0\"}[$__range])) / sum(increase(envoy_cluster_upstream_rq_time_count{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__range]))",
           "legendFormat": "",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {
@@ -478,7 +480,7 @@
           "values": false
         },
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "textMode": "value",
         "justifyMode": "auto",
         "orientation": "auto"

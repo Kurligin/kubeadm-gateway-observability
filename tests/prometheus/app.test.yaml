@@ -1,0 +1,60 @@
+---
+# Unit tests of the High5xxRate alert
+# (charts/observability-extras/templates/prometheusrule.yaml, group
+# envoy-app-counters). Run by `make lint` (scripts/check-rules.sh), which
+# renders the chart into rules.yaml next to this file. Alerts are checked
+# through the ALERTS series, so the tests do not depend on the annotations.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 1 request/s, then from minute 5 a burst of 10 failed requests a minute
+  # (about 14 % of the traffic, above 5 %) in a 5xx series that appears
+  # only with the first failure: fires after 5 minutes.
+  - name: 5xx burst in a fresh series -> fires
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_membership_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '1x30'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '0+60x5 370+70x25'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a", envoy_response_code_class="5"}'
+        values: '_x5 10+10x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="High5xxRate", alertstate="firing"}
+        eval_time: 8m
+        exp_samples: []
+      - expr: ALERTS{alertname="High5xxRate", alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="High5xxRate", alertstate="firing", severity="warning"}'
+            value: 1
+
+  # Every request fails, but at 0.05 requests/s, below the minimum of 0.1/s:
+  # no alert.
+  - name: below the minimum request rate -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '0+3x30'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a", envoy_response_code_class="5"}'
+        values: '0+3x30'
+    promql_expr_test:
+      - expr: ALERTS{alertname="High5xxRate"}
+        eval_time: 20m
+        exp_samples: []
+
+  # No traffic at all: nothing to divide, no alert.
+  - name: idle route -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_membership_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '1x30'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '100x30'
+    promql_expr_test:
+      - expr: ALERTS{alertname="High5xxRate"}
+        eval_time: 20m
+        exp_samples: []

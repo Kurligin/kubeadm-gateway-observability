@@ -264,7 +264,8 @@
           "expr": "sum(increase(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\", version=\"v2\"}[$__range])) / (sum(increase(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__range])) > 0)",
           "legendFormat": "",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "fieldConfig": {

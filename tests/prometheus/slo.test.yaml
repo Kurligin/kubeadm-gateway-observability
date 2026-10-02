@@ -241,8 +241,10 @@ tests:
       - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a", envoy_response_code_class="5"}'
         values: '_x10 10x20'
     promql_expr_test:
-      # About 0.033; within one evaluation step of the recorded counters
-      # (rule groups are evaluated in no fixed order), hence a range.
+      # About 0.033, but not exactly: the SLO groups and the envoy-app-counters
+      # group run on their own tickers, so an SLO rule may see the recorded
+      # counters up to one evaluation interval late (the burst then falls
+      # into a slightly different window). Hence a range, not a value.
       - expr: count(slo:sli_error:ratio_rate5m{slo="app-availability"} > 0.02 < 0.06)
         eval_time: 13m
         exp_samples:

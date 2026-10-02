@@ -18,7 +18,7 @@ spec:
     # in a fresh series read as 0 % errors. These copies (per Envoy pod and
     # cluster) start at 0 as soon as the cluster exists:
     # envoy_cluster_membership_total is created together with the cluster.
-    # Used by High5xxRate, the SLO rules and the dashboards.
+    # Used by High5xxRate (below), the SLO rules and the dashboards.
     - name: envoy-app-counters
       rules:
         - record: envoy_app:upstream_rq_total:filled
@@ -32,22 +32,8 @@ spec:
             or
             0 * group by (namespace, pod, envoy_cluster_name) (envoy_cluster_membership_total{ {{- $app }}})
 
-    # --- Demo application behind the Gateway ---
-    - name: demo-app
-      rules:
-        - alert: AppDown
-          expr: |
-            kube_deployment_status_replicas_available{namespace="{{ .Values.app.namespace }}", deployment=~"{{ $deployments }}"} == 0
-          for: 1m
-          labels:
-            severity: critical
-          annotations:
-            summary: "{{ "{{ $labels.deployment }}" }} has no ready replicas"
-            description: >-
-              Deployment {{ "{{ $labels.namespace }}/{{ $labels.deployment }}" }} has had no available
-              replicas for 1 minute: the Gateway has nowhere to send its share of
-              the traffic. Check `kubectl -n {{ "{{ $labels.namespace }}" }} get pods` and the pod events.
-
+        # In the same group as the counters above: rules of one group run in
+        # order, so the alert always sees this evaluation's values.
         - alert: High5xxRate
           expr: |
             (
@@ -67,6 +53,22 @@ spec:
               (Envoy clusters {{ .Values.envoyGateway.appClusterRegex }}) ended with a 5xx
               response over the last 5 minutes. See the "Demo app — golden signals"
               dashboard and the Angie error log in VictoriaLogs.
+
+    # --- Demo application behind the Gateway ---
+    - name: demo-app
+      rules:
+        - alert: AppDown
+          expr: |
+            kube_deployment_status_replicas_available{namespace="{{ .Values.app.namespace }}", deployment=~"{{ $deployments }}"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ "{{ $labels.deployment }}" }} has no ready replicas"
+            description: >-
+              Deployment {{ "{{ $labels.namespace }}/{{ $labels.deployment }}" }} has had no available
+              replicas for 1 minute: the Gateway has nowhere to send its share of
+              the traffic. Check `kubectl -n {{ "{{ $labels.namespace }}" }} get pods` and the pod events.
 
         - alert: HighP95Latency
           expr: |

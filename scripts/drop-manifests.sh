@@ -6,8 +6,9 @@
 # Reads the rendered manifests (YAML documents separated by "---") on stdin
 # and writes them to stdout without the documents whose top-level "kind"
 # and "metadata.name" match one of the arguments; everything else passes
-# through byte for byte. Used by helmfile (postRenderer of the
-# "victoria-logs" release) for an object the chart has no switch for.
+# through byte for byte. An argument that matched nothing (renamed object,
+# new chart version) is reported on stderr. Used by helmfile (postRenderer
+# of the "victoria-logs" release) for an object the chart has no switch for.
 set -euo pipefail
 
 die() {
@@ -25,7 +26,8 @@ main() {
   awk -v drop="$*" '
     BEGIN { n = split(drop, list, " "); for (i = 1; i <= n; i++) skip[list[i]] = 1 }
     function flush() {
-      if (doc != "" && !((kind "/" name) in skip)) printf "%s", doc
+      if (doc != "" && (kind "/" name) in skip) dropped[kind "/" name] = 1
+      else if (doc != "") printf "%s", doc
       doc = ""; kind = ""; name = ""; in_meta = 0
     }
     /^---/ { flush(); doc = $0 "\n"; next }
@@ -38,7 +40,10 @@ main() {
         name = substr($0, 9); sub(/[ \t\r]+$/, "", name); gsub(/^["\047]|["\047]$/, "", name)
       }
     }
-    END { flush() }
+    END {
+      flush()
+      for (k in skip) if (!(k in dropped)) printf "WARNING: %s: no %s in the manifests, nothing dropped\n", "drop-manifests", k > "/dev/stderr"
+    }
   '
 }
 
