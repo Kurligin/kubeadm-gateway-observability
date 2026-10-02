@@ -291,37 +291,11 @@ kube-state-metrics:
       memory: 48Mi
     limits:
       memory: 192Mi
-  # The chart defaults without "secrets": no rule or dashboard uses the
-  # kube_secret_* metrics, and without that collector kube-state-metrics
-  # needs no read access to Secrets in every namespace.
-  collectors:
-    - certificatesigningrequests
-    - configmaps
-    - cronjobs
-    - daemonsets
-    - deployments
-    - endpointslices
-    - horizontalpodautoscalers
-    - ingresses
-    - jobs
-    - leases
-    - limitranges
-    - mutatingwebhookconfigurations
-    - namespaces
-    - networkpolicies
-    - nodes
-    - persistentvolumeclaims
-    - persistentvolumes
-    - poddisruptionbudgets
-    - pods
-    - replicasets
-    - replicationcontrollers
-    - resourcequotas
-    - services
-    - statefulsets
-    - storageclasses
-    - validatingwebhookconfigurations
-    - volumeattachments
+  # The chart's default collectors without "secrets": no rule or dashboard
+  # uses the kube_secret_* metrics, and without that collector
+  # kube-state-metrics needs no read access to Secrets in every namespace.
+  collectorsExclude:
+    - secrets
   # Gateway API objects as metrics: status conditions of every Gateway
   # (gatewayapi_gateway_status{type="Programmed"}), used by the
   # GatewayNotProgrammed alert.

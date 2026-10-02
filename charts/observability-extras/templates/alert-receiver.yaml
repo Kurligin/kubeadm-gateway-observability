@@ -33,6 +33,12 @@ metadata:
 spec:
   replicas: 1
   revisionHistoryLimit: 3
+  # The new pod is ready before the old one stops: no gap in alert delivery.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- toYaml $selector | nindent 6 }}
@@ -44,6 +50,7 @@ spec:
         # Roll the pod when the script changes.
         checksum/script: {{ $script | sha256sum }}
     spec:
+      restartPolicy: Always
       serviceAccountName: {{ $r.name }}
       automountServiceAccountToken: false
       # Pod Security "restricted": non-root, read-only root filesystem, no

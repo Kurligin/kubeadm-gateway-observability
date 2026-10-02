@@ -7,10 +7,14 @@ the kubeconform option
 
   -schema-location '<out dir>/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json'
 
-Schemas are made strict the way kubectl validates objects: an object that
-declares its properties rejects unknown ones (unless it is marked
-x-kubernetes-preserve-unknown-fields), and x-kubernetes-int-or-string becomes
-"string or integer". Other documents are ignored.
+Schemas are made strict the way kubectl validates objects: an object rejects
+fields its schema does not declare (unless it is marked
+x-kubernetes-preserve-unknown-fields or declares additionalProperties, as a
+map does), also an object without any properties, whose fields the API
+server would prune. Object metadata stays open (the API server validates
+it), embedded resources (x-kubernetes-embedded-resource) accept apiVersion,
+kind and metadata, and x-kubernetes-int-or-string becomes "string or
+integer". Other documents are ignored.
 
   crd_schemas.py <out dir>
 """
@@ -28,7 +32,8 @@ from images import load_documents
 OBJECT_FIELDS = {
     "apiVersion": {"type": "string"},
     "kind": {"type": "string"},
-    "metadata": {"type": "object"},
+    # Marked so that it is never closed (validated by the API server).
+    "metadata": {"type": "object", "x-kubernetes-preserve-unknown-fields": True},
 }
 
 
@@ -43,7 +48,7 @@ def _strict(node: dict[str, Any]) -> None:
         for name, schema in OBJECT_FIELDS.items():
             props.setdefault(name, copy.deepcopy(schema))
     if (
-        "properties" in node
+        ("properties" in node or node.get("type") == "object")
         and "additionalProperties" not in node
         and not node.get("x-kubernetes-preserve-unknown-fields")
     ):
@@ -63,7 +68,7 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     for name, field in OBJECT_FIELDS.items():
         props.setdefault(name, copy.deepcopy(field))
     # Standard object metadata is validated by the API server, not here.
-    props["metadata"] = {"type": "object"}
+    props["metadata"] = copy.deepcopy(OBJECT_FIELDS["metadata"])
     _strict(result)
     return result
 

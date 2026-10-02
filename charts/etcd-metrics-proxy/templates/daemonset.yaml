@@ -13,6 +13,8 @@ spec:
   selector:
     matchLabels:
       {{- include "etcd-metrics-proxy.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
   template:
     metadata:
       labels:
@@ -21,6 +23,7 @@ spec:
         # Restart the proxy when its authorisation config changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      restartPolicy: Always
       serviceAccountName: {{ .Chart.Name }}
       # etcd runs on control-plane nodes and serves metrics on their
       # loopback, which is reachable only from the host network.

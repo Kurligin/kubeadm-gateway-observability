@@ -39,6 +39,17 @@ CRD = {
                                         "type": "object",
                                         "additionalProperties": {"type": "string"},
                                     },
+                                    "empty": {"type": "object"},
+                                    "template": {
+                                        "type": "object",
+                                        "x-kubernetes-embedded-resource": True,
+                                        "properties": {"spec": {"type": "object"}},
+                                    },
+                                    "raw": {
+                                        "type": "object",
+                                        "x-kubernetes-embedded-resource": True,
+                                        "x-kubernetes-preserve-unknown-fields": True,
+                                    },
                                     "items": {
                                         "type": "array",
                                         "items": {
@@ -77,6 +88,26 @@ class StrictSchemaTest(unittest.TestCase):
         spec = self.schema["properties"]["spec"]["properties"]
         self.assertNotIn("additionalProperties", spec["free"])
         self.assertEqual(spec["labels"]["additionalProperties"], {"type": "string"})
+
+    def test_object_without_properties_is_closed(self) -> None:
+        # The API server prunes unknown fields of such an object, so a field
+        # set there would be silently lost: reject it.
+        empty = self.schema["properties"]["spec"]["properties"]["empty"]
+        self.assertIs(empty["additionalProperties"], False)
+
+    def test_metadata_stays_open(self) -> None:
+        metadata = self.schema["properties"]["metadata"]
+        self.assertNotIn("additionalProperties", metadata)
+
+    def test_embedded_resource_accepts_object_fields(self) -> None:
+        spec = self.schema["properties"]["spec"]["properties"]
+        template = spec["template"]
+        self.assertIs(template["additionalProperties"], False)
+        self.assertEqual(set(template["properties"]), {"apiVersion", "kind", "metadata", "spec"})
+        self.assertNotIn("additionalProperties", template["properties"]["metadata"])
+        raw = spec["raw"]
+        self.assertNotIn("additionalProperties", raw)
+        self.assertIn("kind", raw["properties"])
 
     def test_int_or_string(self) -> None:
         size = self.schema["properties"]["spec"]["properties"]["size"]

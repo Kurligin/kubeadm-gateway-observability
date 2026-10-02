@@ -24,6 +24,7 @@ spec:
         # Restart Fluentd when its configuration changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      restartPolicy: Always
       serviceAccountName: fluentd
       # Flush the buffer to disk on shutdown.
       terminationGracePeriodSeconds: 30

@@ -88,6 +88,16 @@ misconfigurations:
 
   # --- Our own charts (MEDIUM gate) ---
   - id: KSV-0125
+    paths:
+      - "namespaces/**"
+      - "network-policies/**"
+      - "pki/**"
+      - "gateway/**"
+      - "ui-routes/**"
+      - "demo-app/**"
+      - "etcd-metrics-proxy/**"
+      - "logging/**"
+      - "observability-extras/**"
     statement: >-
       The check's list of trusted registries is generic. Every image here
       comes from its publisher's registry and is pinned by digest

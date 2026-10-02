@@ -24,10 +24,6 @@ checks:
     # The cluster DNS defaults (ndots 5) are fine: the pods resolve only
     # in-cluster names, if any.
     - dnsconfig-options
-    # Both flag fields that are left at their defaults, which are exactly the
-    # accepted values (restartPolicy Always, strategy RollingUpdate).
-    - restart-policy
-    - no-rolling-update-strategy
     # The network policies select pods of third-party charts (cert-manager,
     # Envoy Gateway, kube-prometheus-stack, VictoriaLogs), and the Envoy
     # Gateway ServiceMonitor selects its Service; those objects are not

@@ -28,6 +28,7 @@ spec:
         # Roll the pods when the configuration changes.
         checksum/config: {{ include "demo-app.angieConf" $ctx | sha256sum }}
     spec:
+      restartPolicy: Always
       serviceAccountName: {{ $.Chart.Name }}
       automountServiceAccountToken: false
       securityContext:
