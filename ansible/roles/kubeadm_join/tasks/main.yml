@@ -1,0 +1,162 @@
+---
+# Joins this host to the cluster of the control plane as a worker node.
+# The bootstrap token is created on the control plane for this join only,
+# handed over in a root-only file that is deleted right after `kubeadm join`,
+# and deleted from the cluster right after it too; it never reaches the
+# repository, the command line or the Ansible output.
+
+# `make add-worker` has already run it before changing anything.
+- name: Detect the join state
+  ansible.builtin.include_tasks: state.yml
+  when: kubeadm_join_joined is not defined
+
+- name: Join the cluster
+  when: not kubeadm_join_joined
+  block:
+    - name: Compute the public key hash of the cluster CA
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl x509 -pubkey -noout -in {{ kubeadm_join_ca_cert | quote }} \
+            | openssl pkey -pubin -outform der | sha256sum | cut -d' ' -f1
+        executable: /bin/bash
+      delegate_to: "{{ kubeadm_join_control_plane }}"
+      register: kubeadm_join_ca_hash_cmd
+      changed_when: false
+
+    - name: Create a short-lived bootstrap token
+      ansible.builtin.command:
+        cmd: >-
+          kubeadm token create --ttl {{ kubeadm_join_token_ttl }}
+          --description "kubeadm-gateway: join {{ kubeadm_join_node_name }}"
+      environment:
+        KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+      delegate_to: "{{ kubeadm_join_control_plane }}"
+      register: kubeadm_join_token_cmd
+      changed_when: true
+      no_log: true
+
+    - name: Write the join configuration
+      ansible.builtin.template:
+        src: kubeadm-join.yaml.j2
+        dest: "{{ kubeadm_join_config_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      vars:
+        kubeadm_join_token: "{{ kubeadm_join_token_cmd.stdout | trim }}"
+        kubeadm_join_ca_hash: "sha256:{{ kubeadm_join_ca_hash_cmd.stdout | trim }}"
+      no_log: true
+
+    # Without the proxy of the deployment: the API server is on the local
+    # network (see kubeadm init in role kubeadm_init).
+    - name: Run kubeadm join
+      ansible.builtin.command:
+        cmd: "kubeadm join --config {{ kubeadm_join_config_path }}"
+      environment: "{{ proxy_env_unset }}"
+      changed_when: true
+
+  rescue:
+    - name: Explain how to recover from a failed kubeadm join
+      ansible.builtin.fail:
+        msg: >-
+          kubeadm join failed, see its output above (preflight errors, the API server
+          {{ kubeadm_join_api_server }} not reachable from {{ kubeadm_join_node_name }}: a firewall must
+          allow TCP {{ k8s_api_server_port }} to the control plane, and the nodes must reach each other
+          on 10250 (kubelet) and 8472/UDP (Cilium VXLAN)). Fix the cause and run `make add-worker` again;
+          if the join got past the preflight checks, reset the worker first: `sudo kubeadm reset` on it.
+
+  always:
+    - name: Delete the join configuration
+      ansible.builtin.file:
+        path: "{{ kubeadm_join_config_path }}"
+        state: absent
+
+    - name: Delete the bootstrap token
+      ansible.builtin.command:
+        cmd: "kubeadm token delete {{ (kubeadm_join_token_cmd.stdout | trim).split('.') | first }}"
+      environment:
+        KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+      delegate_to: "{{ kubeadm_join_control_plane }}"
+      when: kubeadm_join_token_cmd.stdout | default('') | length > 0
+      changed_when: true
+      no_log: true
+
+- name: Wait for the node object
+  ansible.builtin.command:
+    cmd: "kubectl get node {{ kubeadm_join_node_name }} --output json"
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_node_json
+  until: kubeadm_join_node_json.rc == 0
+  retries: 24
+  delay: 5
+  changed_when: false
+
+- name: Label the node as a worker
+  ansible.builtin.command:
+    cmd: "kubectl label node {{ kubeadm_join_node_name }} {{ kubeadm_join_role_label }}="
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  when: kubeadm_join_role_label not in (kubeadm_join_node_json.stdout | from_json).metadata.labels
+  changed_when: true
+
+# The kubelet asks the cluster CA for its serving certificate right after
+# the join (serverTLSBootstrap, from ConfigMap kube-system/kubelet-config).
+# The approver of the control plane signs it off with the names and
+# addresses Ansible knows for this host (written into its node list by the
+# control plane play of this run); renewals are approved by its hourly
+# timer.
+- name: Look for the serving certificate of the kubelet
+  ansible.builtin.stat:
+    path: "{{ kubeadm_join_kubelet_serving_cert }}"
+  register: kubeadm_join_serving_cert
+
+- name: Approve the kubelet serving certificate request of the worker
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      {{ kubeadm_join_approver_script | quote }} {{ kubeadm_join_approver_nodes_file | quote }} >/dev/null
+      kubectl get csr --output json | jq -e --arg user "system:node:{{ kubeadm_join_node_name }}" '[.items[]
+        | select(.spec.signerName == "kubernetes.io/kubelet-serving" and .spec.username == $user)
+        | select((.status.certificate // "") != "")] | length > 0' >/dev/null
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_csr_approval
+  until: kubeadm_join_csr_approval.rc == 0
+  retries: "{{ kubeadm_join_serving_cert_retries }}"
+  delay: 5
+  when: not kubeadm_join_serving_cert.stat.exists
+  changed_when: true
+
+- name: Wait for the serving certificate on the worker
+  ansible.builtin.wait_for:
+    path: "{{ kubeadm_join_kubelet_serving_cert }}"
+    timeout: 120
+  when: not kubeadm_join_serving_cert.stat.exists
+
+# Ready needs the CNI: Cilium starts its agent on the new node by itself
+# (DaemonSet), so does every other DaemonSet (Fluentd, node-exporter).
+- name: Wait for the node to become Ready
+  ansible.builtin.command:
+    cmd: "kubectl wait --for=condition=Ready node/{{ kubeadm_join_node_name }} --timeout={{ kubeadm_join_ready_timeout }}"
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_ready
+  changed_when: false
+  failed_when: false
+
+- name: Explain a node that is not Ready
+  ansible.builtin.fail:
+    msg: >-
+      {{ kubeadm_join_node_name }} joined, but is not Ready after {{ kubeadm_join_ready_timeout }}. Usually the
+      network plugin is missing or cannot start there: the platform (Cilium) must be installed first
+      (`./deploy.sh` on the control plane), and the nodes must reach each other on 8472/UDP (VXLAN).
+      See `kubectl describe node {{ kubeadm_join_node_name }}` and
+      `kubectl -n kube-system get pods -o wide --field-selector spec.nodeName={{ kubeadm_join_node_name }}`.
+  when: kubeadm_join_ready.rc != 0

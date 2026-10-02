@@ -61,11 +61,12 @@
 # puts its host name and node IP there), from the inventory facts of every
 # host (the first play of site.yml gathers them): host name, address of the
 # default route (IPv4 and IPv6), `node_ip` if set; for this node also the
-# API server address it was created with.
+# API server address it was created with. Worker nodes come from role
+# cluster_nodes (the same facts, remembered since `make add-worker`).
 - name: Collect the names and addresses of the inventory nodes
   ansible.builtin.set_fact:
     kubeadm_init_serving_nodes: >-
-      {{ kubeadm_init_serving_nodes | default({}) | combine({
+      {{ kubeadm_init_serving_nodes | default(cluster_nodes_workers | default({})) | combine({
            (hostvars[item]['ansible_facts']['nodename'] | lower):
              ([hostvars[item]['ansible_facts']['nodename'] | lower,
                hostvars[item]['ansible_facts']['default_ipv4']['address'] | default(''),
@@ -73,7 +74,7 @@
                hostvars[item]['node_ip'] | default(''),
                kubeadm_init_node_ip if item == inventory_hostname else '']
               | reject('equalto', '') | unique | list) }) }}
-  loop: "{{ groups['all'] }}"
+  loop: "{{ groups['all'] | difference(groups['workers'] | default([])) }}"
   when: hostvars[item]['ansible_facts']['nodename'] is defined
 
 - name: Write the node list for the certificate approver

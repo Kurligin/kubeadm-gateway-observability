@@ -16,6 +16,14 @@ include versions.env
 VENV ?= .venv
 LOCAL_INVENTORY := ansible/inventory/local.yml
 INVENTORY ?= $(LOCAL_INVENTORY)
+# `make add-worker` / `make remove-worker`: one worker given by its address
+# (inventory worker.yml reads these variables), or several in INVENTORY.
+WORKER ?=
+WORKER_USER ?=
+SSH_KEY ?=
+export WORKER WORKER_USER SSH_KEY
+WORKER_INVENTORY := ansible/inventory/worker.yml
+NODES_INVENTORY = $(if $(strip $(WORKER)),$(WORKER_INVENTORY),$(INVENTORY))
 ANSIBLE_ARGS ?=
 HELMFILE_ARGS ?=
 # Parallel helm processes (diff and upgrade). Unlimited parallelism (the
@@ -69,17 +77,41 @@ CA_FILE ?= ca.crt
 CA_NAMESPACE := cert-manager
 CA_SECRET := demo-ca-keypair
 
-.PHONY: help deploy cluster platform verify status ui ca destroy lint lint-deps versions images images-list
+.PHONY: help deploy cluster platform verify status ui ca destroy lint lint-deps versions images images-list \
+	add-worker remove-worker
+
+# ansible_run <inventory> <playbook>: on this machine without passwordless
+# sudo, Ansible asks for the sudo password once (BECOME password) instead
+# of failing.
+define ansible_run
+if [[ $${EUID} -ne 0 && ( '$(1)' == '$(LOCAL_INVENTORY)' || '$(1)' == '$(WORKER_INVENTORY)' ) \
+	&& -z "$${ANSIBLE_BECOME_ASK_PASS:-}" ]] && ! sudo -n true 2>/dev/null; then \
+	echo '==> sudo requires a password; Ansible will ask for it (BECOME password)'; \
+	export ANSIBLE_BECOME_ASK_PASS=true; \
+fi; \
+echo '$(ANSIBLE_PLAYBOOK) -i $(1) $(2) $(ANSIBLE_ARGS)'; \
+$(ANSIBLE_PLAYBOOK) -i $(1) $(2) $(ANSIBLE_ARGS)
+endef
+
+# add-worker / remove-worker need a worker: WORKER=<address> or an
+# inventory with a "workers" group.
+define require_worker
+if [[ -z '$(strip $(WORKER))' && '$(INVENTORY)' == '$(LOCAL_INVENTORY)' ]]; then \
+	echo 'Set WORKER=<address> [WORKER_USER=ubuntu] [SSH_KEY=<private key>], or INVENTORY=<file> with a "workers" group (see ansible/inventory/multinode.example.yml)' >&2; \
+	exit 1; \
+fi
+endef
 
 help: ## Show this help
 	@printf 'Kubernetes %s (kubeadm) + Cilium %s + Envoy Gateway %s on Ubuntu 24.04\n\n' \
 		'$(K8S_VERSION)' '$(CILIUM_VERSION)' '$(ENVOY_GATEWAY_VERSION)'
 	@printf 'Usage: make <target> [VAR=value]\n\nTargets:\n'
 	@grep -E '^[a-z-]+:.*## ' $(THIS_MAKEFILE) | sort | \
-		awk 'BEGIN {FS = ":.*## "} {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+		awk 'BEGIN {FS = ":.*## "} {printf "  \033[36m%-13s\033[0m %s\n", $$1, $$2}'
 	@printf '\nVariables:\n'
 	@printf '  NODE_IP=<ip>      API server / Gateway address (default: IP of the default route)\n'
 	@printf '  INVENTORY=<file>  Ansible inventory (default: %s)\n' '$(INVENTORY)'
+	@printf '  WORKER=<address>  worker for add-worker / remove-worker (WORKER_USER, SSH_KEY: login over SSH)\n'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
 	@printf '  FORCE=1           confirm `make destroy`\n'
@@ -93,16 +125,19 @@ deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
 	@printf '  make ui       UI addresses (Grafana, Prometheus, Alertmanager, logs) and their passwords\n'
 	@printf '  make ca       demo CA certificate for curl --cacert / the browser\n'
 
-# On this machine without passwordless sudo, Ansible asks for the sudo
-# password once (BECOME password) instead of failing.
 cluster: $(ANSIBLE_PLAYBOOK) ## Prepare the node and bootstrap kubeadm (Ansible only)
-	@if [[ $${EUID} -ne 0 && '$(INVENTORY)' == '$(LOCAL_INVENTORY)' && -z "$${ANSIBLE_BECOME_ASK_PASS:-}" ]] \
-		&& ! sudo -n true 2>/dev/null; then \
-		echo '==> sudo requires a password; Ansible will ask for it (BECOME password)'; \
-		export ANSIBLE_BECOME_ASK_PASS=true; \
-	fi; \
-	echo '$(ANSIBLE_PLAYBOOK) -i $(INVENTORY) ansible/site.yml $(ANSIBLE_ARGS)'; \
-	$(ANSIBLE_PLAYBOOK) -i $(INVENTORY) ansible/site.yml $(ANSIBLE_ARGS)
+	@$(call ansible_run,$(INVENTORY),ansible/site.yml)
+
+# Run on the control plane after `make deploy`; the worker is prepared over
+# SSH with the same roles and joined with a one-time bootstrap token.
+add-worker: $(ANSIBLE_PLAYBOOK) ## Join a worker node over SSH: WORKER=<address> [WORKER_USER=ubuntu SSH_KEY=<key>]
+	@$(require_worker)
+	@$(call ansible_run,$(NODES_INVENTORY),ansible/add-worker.yml)
+	@printf '\n\033[1;32mWorker(s) joined.\033[0m Check: kubectl get nodes -o wide; make verify\n'
+
+remove-worker: $(ANSIBLE_PLAYBOOK) ## Drain, delete and reset a worker node: WORKER=<address>
+	@$(require_worker)
+	@$(call ansible_run,$(NODES_INVENTORY),ansible/remove-worker.yml)
 
 # ensure-*.sh run after every apply: helmfile hooks fire only for changed
 # releases, so this is what restores a deleted Secret (and restarts Grafana
@@ -140,7 +175,9 @@ status: ## Short overview: node, versions, Gateway address, UI links, releases, 
 
 # Passwords are read from the cluster on request only; deploy never prints them.
 ui: ## Show observability UI addresses and their credentials
-	@ip="$$(kubectl -n $(GATEWAY_NAMESPACE) get gateway public -o jsonpath='{.status.addresses[0].value}')"; \
+	@addresses="$$(kubectl -n $(GATEWAY_NAMESPACE) get gateway public -o jsonpath='{range .status.addresses[*]}{.value}{"\n"}{end}')"; \
+	server="$$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; server="$${server#https://}"; server="$${server%:*}"; \
+	if grep -qxF "$$server" <<<"$$addresses"; then ip="$$server"; else ip="$$(head -n1 <<<"$$addresses")"; fi; \
 	secret() { kubectl -n "$$1" get secret "$$2" -o jsonpath="{.data.$$3}" | base64 -d; }; \
 	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local"\n' "$$ip"; \
 	printf 'to /etc/hosts, or use curl --resolve; the certificate is issued by the demo CA, see `make ca`):\n\n'; \

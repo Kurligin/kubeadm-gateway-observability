@@ -1,7 +1,8 @@
 #!/usr/sbin/nft -f
 # {{ ansible_managed }}
-# Metrics ports of host-network agents: reachable from this node and from
-# pods only. Re-loading the file replaces the table atomically.
+# Metrics ports of host-network agents: reachable from this node, from pods
+# and from the other nodes of the cluster only. Re-loading the file replaces
+# the table atomically.
 
 table inet {{ node_firewall_table }}
 delete table inet {{ node_firewall_table }}
@@ -15,7 +16,7 @@ table inet {{ node_firewall_table }} {
     set allowed_v4 {
         type ipv4_addr
         flags interval
-        elements = { {{ node_firewall_allowed_cidrs | join(', ') }} }
+        elements = { {{ (node_firewall_allowed_cidrs + node_firewall_peer_addresses) | unique | join(', ') }} }
     }
 
     chain input {

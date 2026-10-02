@@ -1,0 +1,12 @@
+---
+# Worker nodes of the cluster, kept on the control plane: node name -> the
+# names and addresses Ansible knows for it (host name, address of the
+# default route, IPv6 too, and `node_ip` if set). Written by
+# `make add-worker`, read by every deployment, so that `./deploy.sh` on the
+# control plane (whose default inventory lists only this machine) still
+# knows the workers: their kubelet serving certificates are approved and
+# their addresses may reach the metrics ports of this node. Single node: the
+# file never exists.
+cluster_nodes_file: /etc/kubeadm-gateway/workers.json
+# Node names to forget (set by `make remove-worker`).
+cluster_nodes_removed: []

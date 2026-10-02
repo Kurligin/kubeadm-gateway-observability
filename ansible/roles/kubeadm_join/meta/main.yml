@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: kubeadm_join
+  author: kubeadm-gateway-observability
+  description: Join a worker node to the kubeadm cluster of the control plane with a short-lived bootstrap token.
+  license: Apache-2.0
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

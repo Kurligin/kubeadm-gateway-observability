@@ -33,11 +33,15 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml $.Values.podSecurityContext | nindent 8 }}
-      # Spread replicas across nodes when there is more than one.
+      # Spread replicas across nodes when there is more than one. Only pods
+      # of the same revision count: otherwise, during a rollout, the old
+      # pods on one node push every new pod to the other.
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
+          matchLabelKeys:
+            - pod-template-hash
           labelSelector:
             matchLabels:
               {{- include "demo-app.selectorLabels" $ctx | nindent 14 }}

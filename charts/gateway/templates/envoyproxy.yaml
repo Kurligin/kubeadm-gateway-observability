@@ -22,6 +22,10 @@ spec:
             - maxSkew: {{ $proxy.topologySpread.maxSkew }}
               topologyKey: {{ $proxy.topologySpread.topologyKey }}
               whenUnsatisfiable: {{ $proxy.topologySpread.whenUnsatisfiable }}
+              {{- with $proxy.topologySpread.matchLabelKeys }}
+              matchLabelKeys:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
               labelSelector:
                 matchLabels:
                   {{- include "gateway.proxySelector" . | nindent 18 }}

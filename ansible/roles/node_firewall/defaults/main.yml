@@ -5,8 +5,9 @@
 #   8888  node-exporter kube-rbac-proxy /healthz
 #   9962  cilium-agent      9963  cilium-operator
 #   9964  cilium-envoy      9965  Hubble metrics
-# Only the node itself and pods (Prometheus) may connect; anything else gets
-# a TCP reset. Nothing else on the node is touched.
+# Only the node itself, pods (Prometheus) and the other nodes of the cluster
+# may connect; anything else gets a TCP reset. Nothing else on the node is
+# touched.
 node_firewall_metrics_ports:
   - 9100
   - 8888
@@ -18,6 +19,13 @@ node_firewall_metrics_ports:
 # Sources allowed besides the node's own addresses.
 node_firewall_allowed_cidrs:
   - "{{ k8s_pod_subnet }}"
+
+# IPv4 addresses of the other nodes of the cluster (set by the playbooks;
+# empty on a single node). Traffic of a pod to another node's address
+# leaves its own node masqueraded to that node's address, so Prometheus on
+# one node scraping node-exporter or Cilium on another arrives from a node
+# address, not from the pod network.
+node_firewall_peer_addresses: []
 
 # Own nftables table, loaded by an own oneshot unit: independent of the
 # distribution's nftables.service and of the rules of Cilium.

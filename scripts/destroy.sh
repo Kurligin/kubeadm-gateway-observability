@@ -5,7 +5,8 @@
 # created by kubeadm, kubelet, Cilium and this repository is removed: volumes
 # (local-path), Fluentd positions and buffer, pod logs, the metrics firewall,
 # the kubelet certificate approver.
-# Called by `make destroy FORCE=1`.
+# Called by `make destroy FORCE=1` on the control plane and by
+# `make remove-worker` on a worker.
 set -euo pipefail
 
 readonly CRI_SOCKET="unix:///run/containerd/containerd.sock"
@@ -26,7 +27,8 @@ readonly FIREWALL_TABLE="kubeadm_gateway_metrics"
 # Approver of kubelet serving certificates (Ansible role kubeadm_init).
 readonly APPROVER_UNIT="kubeadm-gateway-kubelet-cert-approver"
 readonly APPROVER_FILES=("/etc/systemd/system/${APPROVER_UNIT}.service" "/etc/systemd/system/${APPROVER_UNIT}.timer"
-  "/usr/local/sbin/kubeadm-gateway-approve-kubelet-certs" "/etc/kubeadm-gateway/kubelet-serving-nodes.json")
+  "/usr/local/sbin/kubeadm-gateway-approve-kubelet-certs" "/etc/kubeadm-gateway/kubelet-serving-nodes.json"
+  "/etc/kubeadm-gateway/workers.json")
 readonly CILIUM_CNI_CONF="/etc/cni/net.d/05-cilium.conflist"
 readonly CILIUM_SYSCTL_CONF="/etc/sysctl.d/99-zzz-override_cilium.conf"
 readonly BPF_FS="/sys/fs/bpf"
@@ -143,11 +145,23 @@ cleanup_node_state() {
   done
 }
 
+# Workers joined to this control plane keep running without it.
+warn_about_workers() {
+  local others
+  others="$(as_root kubectl --kubeconfig "${ADMIN_CONF}" get nodes --no-headers --request-timeout=10s \
+    --selector '!node-role.kubernetes.io/control-plane' --output custom-columns=NAME:.metadata.name 2>/dev/null | xargs)" || true
+  if [[ -n ${others} ]]; then
+    warn "worker nodes are still joined to this cluster: ${others}. They are not reset by this command;" \
+      "remove them first with 'make remove-worker WORKER=<address>', or run 'sudo kubeadm reset' on them."
+  fi
+}
+
 main() {
   # Fingerprint admin.conf before kubeadm reset deletes it.
   local admin_sha=""
   if as_root test -f "${ADMIN_CONF}"; then
     admin_sha="$(file_sha256 "${ADMIN_CONF}")"
+    warn_about_workers
   fi
 
   if command -v kubeadm >/dev/null 2>&1; then
@@ -171,7 +185,11 @@ main() {
   log "Removing kubeconfig files"
   remove_kubeconfigs "${admin_sha}"
 
-  log "Cluster removed. Run 'make deploy' to create it again."
+  if [[ -n ${admin_sha} ]]; then
+    log "Cluster removed. Run 'make deploy' to create it again."
+  else
+    log "Kubernetes state removed from this host."
+  fi
 }
 
 main "$@"

@@ -1,0 +1,35 @@
+---
+# Example inventory for a control plane with several workers. Copy to
+# multinode.yml, adjust and run on the control plane:
+#   make add-worker INVENTORY=ansible/inventory/multinode.yml
+#   make remove-worker INVENTORY=ansible/inventory/multinode.yml   (removes every host of "workers")
+# Workers: Ubuntu 24.04 amd64, reachable over SSH by a user with
+# passwordless sudo. Node names are the host names of the machines and must
+# be unique. List every worker each time: workers left out are kept, but
+# only the listed ones are prepared and checked.
+all:
+  children:
+    control_plane:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3
+        # Or, run from another machine (see remote.example.yml):
+        # node1:
+        #   ansible_host: 203.0.113.10
+        #   ansible_user: ubuntu
+        #   ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+        #   ansible_python_interpreter: /usr/bin/python3
+    workers:
+      vars:
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+        ansible_python_interpreter: /usr/bin/python3
+      hosts:
+        worker1:
+          ansible_host: 203.0.113.11
+        worker2:
+          ansible_host: 203.0.113.12
+          # Optional: kubelet node IP (defaults to the IPv4 address of the
+          # default route interface).
+          # node_ip: 203.0.113.12

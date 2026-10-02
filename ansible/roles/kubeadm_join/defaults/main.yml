@@ -1,0 +1,32 @@
+---
+# Control plane of the inventory whose cluster the worker joins (its API
+# server address is read from its admin kubeconfig, tasks/state.yml).
+kubeadm_join_control_plane: "{{ groups['control_plane'][0] }}"
+# Kubelet node IP of the worker: inventory/host var `node_ip`, else the
+# IPv4 address of the default route interface.
+kubeadm_join_node_ip: "{{ node_ip | default(ansible_facts['default_ipv4']['address'] | default(''), true) }}"
+kubeadm_join_node_name: "{{ ansible_facts['nodename'] | lower }}"
+kubeadm_join_cri_socket: unix:///run/containerd/containerd.sock
+# Preflight checks to ignore, e.g. ["NumCPU", "Mem"] on very small VMs.
+kubeadm_join_ignore_preflight_errors: []
+# Holds the bootstrap token while `kubeadm join` runs; deleted right after.
+kubeadm_join_config_path: /etc/kubernetes/kubeadm-join.yaml
+# The bootstrap token is created for this join only and deleted right after
+# it; the TTL only matters if the run is interrupted in between.
+kubeadm_join_token_ttl: 15m
+# Label shown in the ROLES column of `kubectl get nodes`.
+kubeadm_join_role_label: node-role.kubernetes.io/worker
+# How long the new node may take to become Ready (Cilium starts on it).
+kubeadm_join_ready_timeout: 300s
+# How long to wait for the kubelet serving certificate: retries x 5 seconds.
+kubeadm_join_serving_cert_retries: 36
+
+# Files kubeadm writes on a worker (and on a control plane).
+kubeadm_join_kubelet_kubeconfig: /etc/kubernetes/kubelet.conf
+kubeadm_join_ca_cert: /etc/kubernetes/pki/ca.crt
+kubeadm_join_manifests_dir: /etc/kubernetes/manifests
+kubeadm_join_kubelet_serving_cert: /var/lib/kubelet/pki/kubelet-server-current.pem
+# On the control plane (same paths as role kubeadm_init).
+kubeadm_join_admin_kubeconfig: /etc/kubernetes/admin.conf
+kubeadm_join_approver_script: /usr/local/sbin/kubeadm-gateway-approve-kubelet-certs
+kubeadm_join_approver_nodes_file: /etc/kubeadm-gateway/kubelet-serving-nodes.json

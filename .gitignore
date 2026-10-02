@@ -13,8 +13,9 @@ __pycache__/
 # CA certificate exported by `make ca`
 ca.crt
 
-# Local inventory with real hosts and keys
+# Local inventories with real hosts and keys
 ansible/inventory/remote.yml
+ansible/inventory/multinode.yml
 
 # Vagrant state (`vagrant up`)
 .vagrant/

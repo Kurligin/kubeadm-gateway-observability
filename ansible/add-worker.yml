@@ -1,0 +1,154 @@
+---
+# `make add-worker`: joins the hosts of group "workers" to the cluster of the
+# control plane. Run on the control plane (or wherever `make cluster` runs),
+# with an inventory that lists both (ansible/inventory/worker.yml for one
+# worker given by WORKER=<address>, or a copy of multinode.example.yml).
+# Idempotent: a worker that has already joined is left as it is.
+
+- name: Check the connection to the workers
+  hosts: workers
+  gather_facts: false
+  become: false
+  # One unreachable worker stops the run before anything is changed
+  # (any_errors_fatal would stop at the ignored connection error already,
+  # before the explanation below).
+  max_fail_percentage: 0
+  tasks:
+    - name: Connect to the worker over SSH
+      ansible.builtin.ping:
+      ignore_unreachable: true
+      register: add_worker_ping
+
+    - name: Explain an unreachable worker
+      ansible.builtin.fail:
+        msg: >-
+          Cannot connect to {{ ansible_user | default('?') }}@{{ ansible_host | default(inventory_hostname) }} over SSH
+          ({{ add_worker_ping.msg | default('') | trim }}). Check the address (WORKER), the user (WORKER_USER), the
+          private key (SSH_KEY) and that the key is in ~/.ssh/authorized_keys of that user on the worker; connect
+          once with `ssh` to accept its host key. The user needs passwordless sudo.
+      when: add_worker_ping.unreachable | default(false)
+
+# Refuses, before anything is changed, a worker that is the control plane
+# itself, runs its own control plane, belongs to another cluster or has a
+# node name that is taken (role kubeadm_join, tasks/state.yml).
+- name: Check the workers
+  hosts: workers
+  become: true
+  gather_facts: true
+  max_fail_percentage: 0
+  tasks:
+    - name: Check the operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: >-
+          Supported worker: Ubuntu 24.04 on x86_64 ({{ ansible_host | default(inventory_hostname) }} runs
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} on
+          {{ ansible_facts['architecture'] }}). Nothing has been changed.
+        quiet: true
+
+    - name: Check the join state
+      ansible.builtin.include_role:
+        name: kubeadm_join
+        tasks_from: state.yml
+
+# The control plane first, with the workers in the inventory: their names and
+# addresses are remembered (role cluster_nodes), its metrics firewall lets
+# them in and its kubelet certificate approver knows them.
+- name: Converge the control plane
+  ansible.builtin.import_playbook: site.yml
+
+- name: Prepare and join the worker nodes
+  hosts: workers
+  become: true
+  # Facts come from site.yml.
+  gather_facts: false
+  # Proxy for downloads, only if one is configured (group_vars/all/main.yml).
+  environment: "{{ proxy_env }}"
+  roles:
+    - role: node_prep
+    - role: node_firewall
+      vars:
+        # The control plane and every known worker.
+        node_firewall_peer_addresses: >-
+          {{ ([hostvars[groups['control_plane'][0]]['kubeadm_init_node_ip'],
+               hostvars[groups['control_plane'][0]]['ansible_facts']['default_ipv4']['address'] | default(''),
+               hostvars[groups['control_plane'][0]]['node_ip'] | default('')]
+              + hostvars[groups['control_plane'][0]]['cluster_nodes_worker_ipv4'])
+             | reject('equalto', '') | unique | sort }}
+    - role: containerd
+    - role: kube_packages
+    - role: kubeadm_join
+
+# The scheduler places pods only when they are created: replicas that
+# already run on the control plane stay there after a node joins. Every
+# Deployment that asks to be spread over nodes (topologySpreadConstraints
+# on kubernetes.io/hostname: Envoy, demo app) and still runs on one node
+# only is restarted (rolling, one surge pod at a time, PodDisruptionBudgets
+# respected), so that its replicas spread over the nodes. Already spread:
+# nothing is done.
+- name: Spread replicated workloads over the nodes
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    # Right after a join the node is Ready a moment before it is really
+    # usable: the node lifecycle controller removes its not-ready taint and
+    # the DaemonSets (Cilium, Fluentd, node-exporter) start there. Pods
+    # restarted earlier all land on the old node again.
+    - name: Wait until every node is untainted and runs its DaemonSet pods
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl get nodes --output json | jq -e '[.items[].spec.taints[]?
+            | select(.effect != "PreferNoSchedule" and .key != "node-role.kubernetes.io/control-plane")] | length == 0' >/dev/null
+          kubectl get daemonsets --all-namespaces --output json | jq -e '[.items[]
+            | select(.status.numberReady < .status.desiredNumberScheduled)] | length == 0' >/dev/null
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: add_worker_settled
+      until: add_worker_settled.rc == 0
+      retries: 60
+      delay: 5
+      changed_when: false
+
+    - name: Find Deployments that run on one node despite their spread constraint
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          nodes="$(kubectl get nodes --output json | jq '[.items[] | select(.spec.unschedulable != true)] | length')"
+          [[ ${nodes} -gt 1 ]] || exit 0
+          pods="$(kubectl get pods --all-namespaces --field-selector status.phase=Running --output json)"
+          kubectl get deployments --all-namespaces --output json | jq -r '.items[]
+            | select(.spec.replicas > 1)
+            | select(any(.spec.template.spec.topologySpreadConstraints[]?; .topologyKey == "kubernetes.io/hostname"))
+            | (.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")) as $selector
+            | "\(.metadata.namespace) \(.metadata.name) \($selector)"' |
+            while read -r namespace name selector; do
+              spread="$(jq --arg ns "${namespace}" --arg sel "${selector}" '[.items[]
+                | select(.metadata.namespace == $ns)
+                | select(.metadata.labels as $l | $sel | split(",") | all(split("=") as [$k, $v] | $l[$k] == $v))
+                | .spec.nodeName] | unique | length' <<<"${pods}")"
+              if [[ ${spread} -le 1 ]]; then
+                echo "${namespace}/${name}"
+              fi
+            done
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: add_worker_unspread
+      changed_when: false
+
+    - name: Restart them so that their replicas spread over the nodes
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl --namespace {{ item.split('/')[0] | quote }} rollout restart deployment {{ item.split('/')[1] | quote }}
+          kubectl --namespace {{ item.split('/')[0] | quote }} rollout status deployment {{ item.split('/')[1] | quote }} --timeout=300s
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      loop: "{{ add_worker_unspread.stdout_lines }}"
+      changed_when: true

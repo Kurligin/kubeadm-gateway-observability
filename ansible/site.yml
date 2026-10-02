@@ -1,11 +1,17 @@
 ---
 # Facts of every inventory host first: the names and addresses Ansible knows
 # for each node are what its kubelet serving certificate may contain
-# (role kubeadm_init, tasks/kubelet_serving.yml).
+# (role kubeadm_init, tasks/kubelet_serving.yml). A worker that cannot be
+# reached does not stop the control plane: it keeps the names and addresses
+# remembered for it (role cluster_nodes); `make add-worker` checks the
+# connection to the workers itself before anything else.
 - name: Gather facts of every node of the inventory
   hosts: all
-  gather_facts: true
-  tasks: []
+  gather_facts: false
+  tasks:
+    - name: Gather facts
+      ansible.builtin.setup:
+      ignore_unreachable: true
 
 # Node preparation and kubeadm control plane bootstrap.
 # The platform layer (Cilium, storage, ...) is installed by helmfile afterwards.
@@ -19,7 +25,11 @@
   environment: "{{ proxy_env }}"
   roles:
     - role: node_prep
+    # Worker nodes known to this control plane (none on a single node).
+    - role: cluster_nodes
     - role: node_firewall
+      vars:
+        node_firewall_peer_addresses: "{{ cluster_nodes_worker_ipv4 }}"
     - role: containerd
     - role: kube_packages
     - role: kubeadm_init

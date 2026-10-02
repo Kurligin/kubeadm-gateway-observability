@@ -1,0 +1,66 @@
+---
+# Sets cluster_nodes_workers (node name -> names and addresses) and
+# cluster_nodes_worker_ipv4 (their IPv4 addresses, sorted): the workers
+# remembered on this control plane plus those of the current inventory
+# (group "workers"; their facts win), minus cluster_nodes_removed.
+- name: Look for the list of known worker nodes
+  ansible.builtin.stat:
+    path: "{{ cluster_nodes_file }}"
+  register: cluster_nodes_stat
+
+- name: Read the list of known worker nodes
+  ansible.builtin.slurp:
+    src: "{{ cluster_nodes_file }}"
+  register: cluster_nodes_content
+  when: cluster_nodes_stat.stat.exists
+
+- name: Start from the known worker nodes
+  ansible.builtin.set_fact:
+    cluster_nodes_workers: >-
+      {{ (cluster_nodes_content.content | b64decode | from_json) if cluster_nodes_stat.stat.exists else {} }}
+
+# Inventory workers whose facts could not be gathered (unreachable) keep
+# their remembered entry.
+- name: Add the worker nodes of this inventory
+  ansible.builtin.set_fact:
+    cluster_nodes_workers: >-
+      {{ cluster_nodes_workers | combine({
+           (hostvars[item]['ansible_facts']['nodename'] | lower):
+             ([hostvars[item]['ansible_facts']['nodename'] | lower,
+               hostvars[item]['ansible_facts']['default_ipv4']['address'] | default(''),
+               hostvars[item]['ansible_facts']['default_ipv6']['address'] | default(''),
+               hostvars[item]['node_ip'] | default('')]
+              | reject('equalto', '') | unique | list) }) }}
+  loop: "{{ groups['workers'] | default([]) }}"
+  when: hostvars[item]['ansible_facts']['nodename'] is defined
+
+- name: Forget removed worker nodes
+  ansible.builtin.set_fact:
+    cluster_nodes_workers: "{{ cluster_nodes_workers | dict2items | rejectattr('key', 'in', cluster_nodes_removed) | items2dict }}"
+    cluster_nodes_worker_ipv4: >-
+      {{ cluster_nodes_workers | dict2items | rejectattr('key', 'in', cluster_nodes_removed)
+         | map(attribute='value') | flatten | select('match', '^[0-9]+(\.[0-9]+){3}$') | unique | sort }}
+
+- name: Create the directory of the worker list
+  ansible.builtin.file:
+    path: "{{ cluster_nodes_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: cluster_nodes_workers | length > 0
+
+- name: Remember the worker nodes
+  ansible.builtin.copy:
+    content: "{{ cluster_nodes_workers | to_nice_json }}\n"
+    dest: "{{ cluster_nodes_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: cluster_nodes_workers | length > 0
+
+- name: Remove the worker list when no worker is left
+  ansible.builtin.file:
+    path: "{{ cluster_nodes_file }}"
+    state: absent
+  when: cluster_nodes_workers | length == 0

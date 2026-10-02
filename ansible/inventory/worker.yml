@@ -1,0 +1,22 @@
+---
+# Inventory of `make add-worker` / `make remove-worker` with one worker:
+# this machine is the control plane, the worker is reached over SSH.
+#   make add-worker WORKER=<address> [WORKER_USER=ubuntu] [SSH_KEY=~/.ssh/id_ed25519]
+# The values come from these environment variables (set by the Makefile).
+# Several workers, or a control plane reached over SSH: see
+# multinode.example.yml.
+all:
+  children:
+    control_plane:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3
+    workers:
+      hosts:
+        worker:
+          ansible_host: "{{ lookup('ansible.builtin.env', 'WORKER') }}"
+          ansible_user: "{{ lookup('ansible.builtin.env', 'WORKER_USER') | default('ubuntu', true) }}"
+          # Empty: the default keys of ssh (and the ssh agent).
+          ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'SSH_KEY') }}"
+          ansible_python_interpreter: /usr/bin/python3

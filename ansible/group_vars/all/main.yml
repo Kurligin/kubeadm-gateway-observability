@@ -20,8 +20,10 @@ kube_user: >-
      | default(lookup('ansible.builtin.env', 'USER'), true)
      | default('root', true) }}
 
-# Single-node cluster: allow workloads on the control plane and let Cilium
-# node IPAM use this node for LoadBalancer Services.
+# Allow workloads on the control plane and let Cilium node IPAM use this
+# node for LoadBalancer Services. Required on a single node; kept when
+# workers join (`make add-worker`): the local-path volumes of Prometheus and
+# VictoriaLogs live on this node, and the Gateway keeps its address.
 k8s_single_node: true
 
 # HTTP(S) proxy, taken from the environment of the deployment (HTTP_PROXY,

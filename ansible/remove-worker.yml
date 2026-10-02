@@ -1,0 +1,185 @@
+---
+# `make remove-worker`: takes the hosts of group "workers" out of the
+# cluster: drain, reset the host (scripts/destroy.sh, the same cleanup as
+# `make destroy`), delete the Node, then the control plane forgets them
+# (metrics firewall, kubelet certificate approver). A worker that cannot be
+# reached any more is still drained and deleted; resetting it is then left
+# to whoever brings it back. Pods with local-path volumes on the worker
+# would lose their data, so such a worker is refused.
+
+- name: Find the worker nodes
+  hosts: workers
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Gather facts of the worker
+      ansible.builtin.setup:
+        gather_subset: [min, network]
+      ignore_unreachable: true
+      register: remove_worker_setup
+
+    - name: Remember whether the worker is reachable
+      ansible.builtin.set_fact:
+        remove_worker_reachable: "{{ not (remove_worker_setup.unreachable | default(false)) }}"
+
+    - name: Report an unreachable worker
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_host | default(inventory_hostname) }} cannot be reached over SSH: it is drained and deleted
+          from the cluster, but not reset. Before it joins any cluster again, run `sudo kubeadm reset` on it
+          (or `make destroy FORCE=1` from a copy of this repository).
+      when: not remove_worker_reachable
+
+    # By host name if the worker answers, else by its address.
+    - name: Find the node of the worker in the cluster
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl get nodes --output json | jq -r --arg name "${NODE_NAME}" --arg ip "${NODE_ADDRESS}" '.items[]
+            | select(if $name != "" then .metadata.name == $name
+                     else any(.status.addresses[]; .type == "InternalIP" and .address == $ip) end)
+            | .metadata.name'
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+        NODE_NAME: "{{ ansible_facts['nodename'] | default('') | lower }}"
+        NODE_ADDRESS: "{{ ansible_host | default(inventory_hostname) }}"
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      become: true
+      register: remove_worker_node_cmd
+      changed_when: false
+
+    # The control plane forgets the worker by this name, also when it is
+    # not (or no longer) a node of the cluster.
+    - name: Remember the node name
+      ansible.builtin.set_fact:
+        remove_worker_node: "{{ remove_worker_node_cmd.stdout | trim }}"
+        remove_worker_name: >-
+          {{ (remove_worker_node_cmd.stdout | trim) or (ansible_facts['nodename'] | default('') | lower) }}
+
+    # A join that failed half-way (or a Node deleted by hand) leaves a
+    # kubelet of this cluster on the worker without a Node: reset it too.
+    - name: Read the API server of the cluster
+      ansible.builtin.command:
+        cmd: kubectl config view --minify --output jsonpath={.clusters[0].cluster.server}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      become: true
+      register: remove_worker_api_server
+      changed_when: false
+
+    - name: Read the kubelet kubeconfig of the worker
+      ansible.builtin.slurp:
+        src: /etc/kubernetes/kubelet.conf
+      become: true
+      register: remove_worker_kubelet_conf
+      failed_when: false
+      when: remove_worker_reachable
+
+    - name: Remember whether the worker belongs to this cluster
+      ansible.builtin.set_fact:
+        remove_worker_joined: >-
+          {{ remove_worker_node | length > 0
+             or ('content' in remove_worker_kubelet_conf
+                 and (remove_worker_kubelet_conf.content | b64decode | from_yaml).clusters[0].cluster.server
+                     == remove_worker_api_server.stdout) }}
+
+    - name: Report a worker that is not in the cluster
+      ansible.builtin.debug:
+        msg: "{{ ansible_host | default(inventory_hostname) }} is not a node of this cluster; nothing to remove."
+      when: not remove_worker_joined
+
+- name: Drain, reset and delete the worker nodes
+  hosts: workers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Check and drain the node
+      when: remove_worker_node | length > 0
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      block:
+        - name: Read the node and the persistent volumes
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              { kubectl get node {{ remove_worker_node | quote }} --output json
+                kubectl get persistentvolumes --output json | jq '.items[]'; } | jq -s '{items: .}'
+            executable: /bin/bash
+          register: remove_worker_objects
+          changed_when: false
+
+        - name: Refuse to remove a control plane node
+          ansible.builtin.assert:
+            that:
+              - "'node-role.kubernetes.io/control-plane' not in remove_worker_node_labels"
+            fail_msg: "{{ remove_worker_node }} is a control plane node, not a worker. Nothing has been changed."
+            quiet: true
+          vars:
+            remove_worker_node_labels: >-
+              {{ (remove_worker_objects.stdout | from_json)['items']
+                 | selectattr('kind', 'equalto', 'Node') | map(attribute='metadata.labels') | first }}
+
+        # A local-path volume is a directory on that node: its pod cannot
+        # move elsewhere and the data would be lost with the node.
+        - name: Refuse a node that holds local volumes
+          ansible.builtin.assert:
+            that:
+              - remove_worker_volumes | length == 0
+            fail_msg: >-
+              {{ remove_worker_node }} holds local-path volumes ({{ remove_worker_volumes | join(', ') }}); their
+              data lives on that node only. Move or delete the workloads that use them first. Nothing has been changed.
+            quiet: true
+          vars:
+            remove_worker_volumes: >-
+              {{ (remove_worker_objects.stdout | from_json)['items'] | selectattr('kind', 'equalto', 'PersistentVolume')
+                 | selectattr('spec.nodeAffinity', 'defined')
+                 | selectattr('spec.nodeAffinity.required.nodeSelectorTerms', 'defined')
+                 | map(attribute='spec.nodeAffinity.required.nodeSelectorTerms') | flatten
+                 | map(attribute='matchExpressions') | flatten | map(attribute='values') | flatten
+                 | select('equalto', remove_worker_node) | list }}
+
+        # PodDisruptionBudgets (Envoy, demo app) keep one replica serving
+        # while the other moves to the remaining nodes.
+        - name: Drain the node
+          ansible.builtin.command:
+            cmd: >-
+              kubectl drain {{ remove_worker_node }} --ignore-daemonsets --delete-emptydir-data
+              --timeout=300s
+          changed_when: true
+
+    # Same cleanup as `make destroy`: kubeadm reset, Cilium and kubelet
+    # state, iptables rules, metrics firewall, pod logs. Before the Node is
+    # deleted, so that its kubelet is gone and cannot register it again.
+    - name: Reset the worker
+      ansible.builtin.script:
+        cmd: ../scripts/destroy.sh
+      when: remove_worker_reachable and remove_worker_joined
+      changed_when: true
+
+    - name: Delete the node
+      ansible.builtin.command:
+        cmd: "kubectl delete node {{ remove_worker_node }}"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: remove_worker_node | length > 0
+      changed_when: true
+
+- name: Forget the removed workers on the control plane
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: Collect the removed node names
+      ansible.builtin.set_fact:
+        cluster_nodes_removed: >-
+          {{ groups['workers'] | default([]) | map('extract', hostvars, 'remove_worker_name')
+             | select | list }}
+
+# Metrics firewall and kubelet certificate approver of the control plane
+# without the removed workers (role cluster_nodes reads
+# cluster_nodes_removed).
+- name: Converge the control plane
+  ansible.builtin.import_playbook: site.yml

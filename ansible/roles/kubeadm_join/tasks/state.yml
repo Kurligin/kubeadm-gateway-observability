@@ -1,0 +1,143 @@
+---
+# Decides whether this host has already joined the cluster of the control
+# plane (kubeadm_join_joined) and refuses anything that would be unsafe to
+# touch: no cluster on the control plane, the control plane itself, a host
+# with its own control plane, a host that belongs to another cluster, or a
+# node name already taken. Changes nothing; `make add-worker` runs it
+# before anything else.
+- name: Read the API server address of the cluster
+  ansible.builtin.command:
+    cmd: kubectl config view --minify --output jsonpath={.clusters[0].cluster.server}
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_server_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Check that the control plane runs a cluster
+  ansible.builtin.assert:
+    that:
+      - kubeadm_join_server_cmd.rc == 0
+      - kubeadm_join_server_cmd.stdout is match('https://')
+    fail_msg: >-
+      No cluster found on the control plane ({{ kubeadm_join_admin_kubeconfig }} on {{ kubeadm_join_control_plane }}).
+      Deploy it first (`./deploy.sh`), then add workers.
+    quiet: true
+
+- name: Remember the API server address
+  ansible.builtin.set_fact:
+    kubeadm_join_api_server: "{{ kubeadm_join_server_cmd.stdout | urlsplit('netloc') }}"
+
+- name: Check that the worker is not the control plane itself
+  ansible.builtin.assert:
+    that:
+      - kubeadm_join_api_server.split(':') | first not in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      {{ ansible_host | default(inventory_hostname) }} is the control plane itself (API server
+      {{ kubeadm_join_api_server }}). WORKER must be another machine. Nothing has been changed.
+    quiet: true
+
+- name: Check the node address of the worker
+  ansible.builtin.assert:
+    that:
+      - kubeadm_join_node_ip in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      Node address "{{ kubeadm_join_node_ip }}" is not assigned to any interface of {{ kubeadm_join_node_name }}.
+      Set node_ip in the inventory to one of: {{ ansible_facts['all_ipv4_addresses'] | join(', ') }}.
+      Nothing has been changed.
+    quiet: true
+
+- name: Look for traces of a control plane on the worker
+  ansible.builtin.find:
+    paths: "{{ kubeadm_join_manifests_dir }}"
+    patterns: "*.yaml"
+  register: kubeadm_join_manifests
+
+- name: Look for an admin kubeconfig on the worker
+  ansible.builtin.stat:
+    path: "{{ kubeadm_join_admin_kubeconfig }}"
+  register: kubeadm_join_admin_conf
+
+- name: Refuse a host that runs its own control plane
+  ansible.builtin.fail:
+    msg: >-
+      {{ kubeadm_join_node_name }} has its own Kubernetes control plane
+      ({{ (([kubeadm_join_admin_kubeconfig] if kubeadm_join_admin_conf.stat.exists else [])
+          + (kubeadm_join_manifests.files | map(attribute='path') | list)) | join(', ') }}).
+      It cannot become a worker of another cluster while that exists. If it is no longer needed, run
+      `make destroy FORCE=1` on it (or `sudo kubeadm reset`), then add it again. Nothing has been changed.
+  when: kubeadm_join_admin_conf.stat.exists or kubeadm_join_manifests.matched > 0
+
+- name: Look for the kubelet kubeconfig of an earlier join
+  ansible.builtin.stat:
+    path: "{{ kubeadm_join_kubelet_kubeconfig }}"
+  register: kubeadm_join_kubelet_conf
+
+- name: Compare the cluster the worker belongs to with this one
+  when: kubeadm_join_kubelet_conf.stat.exists
+  block:
+    - name: Read the kubelet kubeconfig of the worker
+      ansible.builtin.slurp:
+        src: "{{ kubeadm_join_kubelet_kubeconfig }}"
+      register: kubeadm_join_kubelet_conf_content
+
+    - name: Read the cluster CA of the worker
+      ansible.builtin.stat:
+        path: "{{ kubeadm_join_ca_cert }}"
+        checksum_algorithm: sha256
+      register: kubeadm_join_worker_ca
+
+    - name: Read the cluster CA of the control plane
+      ansible.builtin.stat:
+        path: "{{ kubeadm_join_ca_cert }}"
+        checksum_algorithm: sha256
+      delegate_to: "{{ kubeadm_join_control_plane }}"
+      register: kubeadm_join_cluster_ca
+
+    - name: Refuse a worker of another cluster
+      ansible.builtin.assert:
+        that:
+          - kubeadm_join_worker_server == 'https://' ~ kubeadm_join_api_server
+          - kubeadm_join_worker_ca.stat.checksum | default('') == kubeadm_join_cluster_ca.stat.checksum
+        fail_msg: >-
+          {{ kubeadm_join_node_name }} already belongs to another cluster (its kubelet talks to
+          {{ kubeadm_join_worker_server }} with a different cluster CA; this cluster is
+          https://{{ kubeadm_join_api_server }}). Remove it from that cluster first: there,
+          `kubectl drain` and `kubectl delete node {{ kubeadm_join_node_name }}`; on the host,
+          `sudo kubeadm reset` (or `make destroy FORCE=1` from a copy of this repository). Then add it again.
+          Nothing has been changed.
+        quiet: true
+      vars:
+        kubeadm_join_worker_server: >-
+          {{ (kubeadm_join_kubelet_conf_content.content | b64decode | from_yaml).clusters[0].cluster.server }}
+
+- name: Look for the node in the cluster
+  ansible.builtin.command:
+    cmd: "kubectl get node {{ kubeadm_join_node_name }} --output name --ignore-not-found"
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_node_object
+  changed_when: false
+
+- name: Evaluate the join state
+  ansible.builtin.set_fact:
+    kubeadm_join_joined: "{{ kubeadm_join_kubelet_conf.stat.exists }}"
+    kubeadm_join_node_exists: "{{ kubeadm_join_node_object.stdout | length > 0 }}"
+
+- name: Refuse a joined worker whose node was deleted
+  ansible.builtin.fail:
+    msg: >-
+      {{ kubeadm_join_node_name }} has joined this cluster before, but its Node object is gone (deleted
+      with kubectl?). Its kubelet cannot register again with the old credentials. Run
+      `make remove-worker WORKER={{ ansible_host | default(inventory_hostname) }}` (resets it), then add it again.
+  when: kubeadm_join_joined and not kubeadm_join_node_exists
+
+- name: Refuse a node name that is already taken
+  ansible.builtin.fail:
+    msg: >-
+      The cluster already has a node named {{ kubeadm_join_node_name }}, but this host has not joined it
+      (another machine with the same host name?). Node names must be unique: change the host name of
+      this machine, or remove the other node first. Nothing has been changed.
+  when: not kubeadm_join_joined and kubeadm_join_node_exists

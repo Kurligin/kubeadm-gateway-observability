@@ -28,11 +28,15 @@ envoyProxy:
     maxUnavailable: 0
     maxSurge: 1
   # Spread the proxies over nodes when there are several; on a single node
-  # both run there (ScheduleAnyway).
+  # both run there (ScheduleAnyway). Only pods of the same revision count
+  # (pod-template-hash): otherwise, during a rollout, the old pods on one
+  # node push every new pod to the other.
   topologySpread:
     maxSkew: 1
     topologyKey: kubernetes.io/hostname
     whenUnsatisfiable: ScheduleAnyway
+    matchLabelKeys:
+      - pod-template-hash
   resources:
     requests:
       cpu: 50m
