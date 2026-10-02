@@ -175,6 +175,10 @@ grafana:
     HTTPS_PROXY: {{ $httpsProxy | quote }}
     NO_PROXY: {{ printf "%s,%s,%s,%s" $noProxy .Values.monitoring.namespace .Values.logging.namespace .Values.tracing.namespace | trimPrefix "," | quote }}
   {{- end }}
+  # The plugin download (Go) uses the classic X25519 TLS key exchange, like
+  # containerd (see docs/operations.md, network in Russia).
+  env:
+    GODEBUG: tlsmlkem=0
   # Admin credentials come from a Secret created on the first deploy by
   # scripts/ensure-grafana-admin.sh (random password, never in git).
   admin:
@@ -199,9 +203,9 @@ grafana:
     plugins:
       # VictoriaLogs datasource, <id>@<version>@<url>: downloaded from its
       # GitHub release (github.com is reachable where grafana.com may not
-      # be), the archive grafana.com serves too. It is signed by
-      # VictoriaMetrics, and Grafana verifies the signature with its
-      # built-in key, so no unsigned plugin is allowed. Installed in the
+      # be), the archive grafana.com serves too. It has a Grafana Labs
+      # signature (commercial, organisation VictoriaMetrics) that Grafana
+      # verifies with its built-in key, so no unsigned plugin is allowed. Installed in the
       # background on start-up: if GitHub is not reachable, Grafana still
       # starts (only the VictoriaLogs datasource stays unavailable; logs
       # remain visible in vmui).

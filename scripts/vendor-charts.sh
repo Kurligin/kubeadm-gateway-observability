@@ -119,7 +119,7 @@ check() {
     [[ -n ${extra} ]] || continue
     err "${extra}: not a chart of ${VERSIONS_FILE} (stale? scripts/vendor-charts.sh fetch removes it)"
     rc=1
-  done < <(comm -23 <(find "${VENDOR_DIR}" -type f 2>/dev/null | sort) <(expected_files | sort))
+  done < <(comm -23 <(find "${VENDOR_DIR}" -type f -name '*.tgz' 2>/dev/null | sort) <(expected_files | sort))
   [[ ${rc} -eq 0 ]] && log "${count} vendored charts match ${VERSIONS_FILE} (version and sha256)"
   return "${rc}"
 }
@@ -158,7 +158,7 @@ fetch() {
     [[ -n ${stale} ]] || continue
     rm -f -- "${stale}"
     log "removed: ${stale}"
-  done < <(comm -23 <(find "${VENDOR_DIR}" -type f | sort) <(expected_files | sort))
+  done < <(comm -23 <(find "${VENDOR_DIR}" -type f -name '*.tgz' | sort) <(expected_files | sort))
   check
 }
 

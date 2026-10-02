@@ -170,8 +170,8 @@ namespaces.
   того же чарта убран post-renderer'ом `scripts/drop-manifests.sh`: у чарта
   нет переключателя для отдельных дашбордов, а логи здесь собирает Fluentd).
   Источник данных VictoriaLogs — плагин `victoriametrics-logs-datasource`,
-  Grafana скачивает его из релиза GitHub при старте (подписан, подпись
-  проверяется).
+  Grafana скачивает его из релиза GitHub при старте (подписан Grafana
+  Labs, подпись проверяется).
 - **metrics-server** (kube-system) отдаёт Resource Metrics API без
   `--kubelet-insecure-tls`: kubelet получает серверный сертификат от CA
   кластера (`serverTLSBootstrap`, см. [security.md](security.md#сертификаты-kubelet-от-ca-кластера)),

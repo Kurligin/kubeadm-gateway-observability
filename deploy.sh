@@ -22,8 +22,11 @@ readonly COLLECTIONS_FILE="${REPO_DIR}/ansible/requirements.yml"
 readonly COLLECTIONS_DIR="${REPO_DIR}/ansible/collections"
 readonly SYSTEM_PACKAGES=(python3 python3-venv make)
 readonly CLOUD_INIT_TIMEOUT=900
-# Kept by sudo (it resets the environment otherwise).
-readonly PROXY_VARS=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy
+# Kept by sudo (it resets the environment otherwise): proxy and registry
+# mirror settings.
+MIRROR_VARS=REGISTRY_MIRRORS_DOCKER_IO,REGISTRY_MIRRORS_QUAY_IO
+MIRROR_VARS+=,REGISTRY_MIRRORS_REGISTRY_K8S_IO,REGISTRY_MIRRORS_GHCR_IO
+readonly PROXY_VARS=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,${MIRROR_VARS}
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }

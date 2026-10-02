@@ -105,6 +105,13 @@ class VendorChartsCheckTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cilium-0.0.1.tgz", result.stderr)
 
+    def test_documentation_files_are_not_charts(self) -> None:
+        vendor = self.repo / "vendor" / "charts"
+        (vendor / "README.md").write_text("charts\n")
+        (vendor / "LICENSE-Apache-2.0.txt").write_text("license\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_wrong_chart_inside_fails(self) -> None:
         # Pinned checksum of an archive that holds another chart.
         path = self.files["CERT_MANAGER_CHART_SHA256"]

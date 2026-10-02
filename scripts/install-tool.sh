@@ -43,7 +43,10 @@ main() {
   IFS='|' read -r -a sources <<<"${urls}"
   for url in "${sources[@]}"; do
     log "Downloading ${url}"
-    if ! curl -fsSL --retry 3 --connect-timeout 20 -o "${tmp}/archive.tar.gz" "${url}"; then
+    # A source that cannot be reached in 15 s, or stalls below 1 KiB/s for
+    # 30 s, is given up on (after the retries) for the next one.
+    if ! curl -fsSL --retry 2 --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+      -o "${tmp}/archive.tar.gz" "${url}"; then
       warn "download failed: ${url}"
       continue
     fi

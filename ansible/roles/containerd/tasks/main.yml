@@ -115,7 +115,8 @@
     containerd_registry_hosts: >-
       {{ containerd_registry_hosts
          + [{'registry': item.key, 'server': item.value.server,
-             'mirrors': (item.value.mirrors | default('', true)).split(',') | map('trim') | reject('equalto', '') | list}] }}
+             'mirrors': (item.value.mirrors | default('', true)).split(',') | map('trim')
+                        | map('regex_replace', '/+$', '') | reject('equalto', '') | list}] }}
   loop: "{{ registry_mirrors | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
@@ -123,9 +124,10 @@
 - name: Check the registry mirror addresses
   ansible.builtin.assert:
     that:
-      - item.1 is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+      - item.1 is match('^https?://([A-Za-z0-9.-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?$')
     fail_msg: >-
-      Registry mirror '{{ item.1 }}' of {{ item.0.registry }} is not a URL of the form https://host[:port] (a mirror
+      Registry mirror '{{ item.1 }}' of {{ item.0.registry }} is not a URL of the form https://host[:port] or
+      https://[IPv6 address][:port] (a mirror
       serves the registry's namespace at its root). Set REGISTRY_MIRRORS_{{ item.0.registry | upper
       | regex_replace('[^A-Z0-9]', '_') }} to a comma-separated list of such URLs, or to an empty value for none.
     quiet: true
@@ -145,6 +147,42 @@
        + containerd_registry_hosts | selectattr('mirrors') | map(attribute='registry')
          | map('regex_replace', '^', containerd_hosts_dir ~ '/') | list }}
 
+# Only files this role wrote (they carry its marker line) are replaced or
+# removed; find matches `contains` against each line from its start. A
+# hosts.toml of a registry with mirrors that someone else wrote stops the
+# run instead of being overwritten.
+- name: Find registry host files written by an earlier run
+  ansible.builtin.find:
+    paths: "{{ containerd_hosts_dir }}"
+    patterns: hosts.toml
+    recurse: true
+    depth: 2
+    contains: "# kubeadm-gateway-observability registry mirrors"
+  register: containerd_hosts_files
+
+- name: Look for registry host files of other origin
+  ansible.builtin.stat:
+    path: "{{ containerd_hosts_dir }}/{{ item.registry }}/hosts.toml"
+  loop: "{{ containerd_registry_hosts | selectattr('mirrors') | list }}"
+  loop_control:
+    label: "{{ item.registry }}"
+  register: containerd_hosts_existing
+
+- name: Stop instead of overwriting a registry host file of other origin
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or containerd_hosts_file in (containerd_hosts_files.files | map(attribute='path') | list)
+    fail_msg: >-
+      {{ containerd_hosts_file }} exists and was not written by this deployment. Merge the mirrors into it by hand and set
+      REGISTRY_MIRRORS_{{ item.item.registry | upper | regex_replace('[^A-Z0-9]', '_') }}= (empty) to leave it alone,
+      or move it away. Nothing has been changed.
+    quiet: true
+  loop: "{{ containerd_hosts_existing.results }}"
+  loop_control:
+    label: "{{ item.item.registry }}"
+  vars:
+    containerd_hosts_file: "{{ containerd_hosts_dir }}/{{ item.item.registry }}/hosts.toml"
+
 - name: Configure the registry mirrors
   ansible.builtin.template:
     src: hosts.toml.j2
@@ -155,16 +193,6 @@
   loop: "{{ containerd_registry_hosts | selectattr('mirrors') | list }}"
   loop_control:
     label: "{{ item.registry }}: {{ item.mirrors | join(', ') }}, then {{ item.server }}"
-
-# Only files this role wrote (they carry its marker line) are removed.
-# find matches `contains` against each line from its start.
-- name: Find registry host files written by an earlier run
-  ansible.builtin.find:
-    paths: "{{ containerd_hosts_dir }}"
-    patterns: hosts.toml
-    recurse: true
-    contains: "# kubeadm-gateway-observability registry mirrors"
-  register: containerd_hosts_files
 
 - name: Remove the host files of registries without mirrors
   ansible.builtin.file:
@@ -178,6 +206,26 @@
   ansible.builtin.template:
     src: containerd.service.j2
     dest: /etc/systemd/system/containerd.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart containerd
+
+# TLS of image pulls without the post-quantum key share (GODEBUG
+# tlsmlkem=0, see the drop-in): a precaution for networks whose filtering
+# breaks TLS handshakes with a large ClientHello.
+- name: Create the containerd drop-in directory
+  ansible.builtin.file:
+    path: "{{ containerd_dropin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure the TLS settings of containerd
+  ansible.builtin.template:
+    src: godebug.conf.j2
+    dest: "{{ containerd_dropin_dir }}/godebug.conf"
     owner: root
     group: root
     mode: "0644"

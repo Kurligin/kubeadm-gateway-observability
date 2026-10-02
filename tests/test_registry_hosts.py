@@ -36,7 +36,8 @@ class HostsTomlTest(unittest.TestCase):
         # TOML tables keep their order: containerd tries the hosts in it.
         self.assertEqual(list(config["host"]), mirrors)
         for host in config["host"].values():
-            self.assertEqual(host["capabilities"], ["pull", "resolve"])
+            # Never "resolve": tags are resolved by the registry itself.
+            self.assertEqual(host["capabilities"], ["pull"])
             self.assertIn("dial_timeout", host)
 
     def test_marker_comment(self) -> None:
@@ -45,6 +46,11 @@ class HostsTomlTest(unittest.TestCase):
         text = render("quay.io", "https://quay.io", ["https://m.example"])
         marker = "# kubeadm-gateway-observability registry mirrors"
         self.assertTrue(any(line.startswith(marker) for line in text.splitlines()))
+
+    def test_ipv6_mirror(self) -> None:
+        text = render("docker.io", "https://registry-1.docker.io", ["https://[2001:db8::1]:5000"])
+        config = tomllib.loads(text)
+        self.assertEqual(list(config["host"]), ["https://[2001:db8::1]:5000"])
 
     def test_special_characters_are_quoted(self) -> None:
         text = render("docker.io", "https://registry-1.docker.io", ['https://x.example/"q'])

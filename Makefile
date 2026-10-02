@@ -41,6 +41,12 @@ ANSIBLE_PLAYBOOK := $(VENV)/bin/ansible-playbook
 HELMFILE := helmfile --file helmfile.yaml.gotmpl
 
 export ANSIBLE_CONFIG := $(CURDIR)/ansible/ansible.cfg
+# Go programs run from here (helm, helmfile, kubectl, ctr) use the classic
+# X25519 TLS key exchange instead of the post-quantum one of Go 1.24+,
+# whose larger ClientHello some network filters break (a precaution; see
+# docs/operations.md). A GODEBUG set in the environment is kept as it is.
+GODEBUG ?= tlsmlkem=0
+export GODEBUG
 export PATH := $(CURDIR)/$(VENV)/bin:$(PATH)
 
 # HTTP(S) proxy, only if one is set in the environment (otherwise nothing

@@ -17,7 +17,8 @@
     url: "{{ item.1 }}"
     dest: "{{ download_cache_dir }}/{{ item.0.archive }}"
     checksum: "sha256:{{ item.0.sha256 }}"
-    timeout: 60
+    # Per request: a source that does not answer is given up on soon.
+    timeout: 30
     owner: root
     group: root
     mode: "0644"
@@ -26,7 +27,7 @@
     label: "{{ item.0.name }} {{ item.0.version }} from {{ item.1 | urlsplit('hostname') }}"
   register: helm_tools_download
   retries: 2
-  delay: 5
+  delay: 3
   until: helm_tools_download is succeeded
   ignore_errors: true
 

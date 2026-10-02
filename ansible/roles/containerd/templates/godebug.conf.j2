@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Go 1.24+ offers the post-quantum key share X25519MLKEM768 by default, which
+# makes the TLS ClientHello larger than one packet. Some network filters
+# drop or reset such handshakes (curl, with a smaller ClientHello, still
+# gets through), so containerd uses the classic X25519 key exchange, as Go
+# did before 1.24. Certificates are verified as before; nothing else changes.
+[Service]
+Environment=GODEBUG=tlsmlkem=0

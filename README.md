@@ -209,12 +209,22 @@ REGISTRY_MIRRORS_DOCKER_IO= ./deploy.sh
 REGISTRY_MIRRORS_QUAY_IO=https://quay.m.daocloud.io REGISTRY_MIRRORS_REGISTRY_K8S_IO=https://k8s.m.daocloud.io ./deploy.sh
 ```
 
-**Почему зеркалу можно доверять:** все образы закреплены по digest
-(`make lint` это проверяет), а containerd сверяет с ним каждый манифест и
-слой. Зеркало может только не отдать образ — тогда containerd идёт к
-следующему, — но подменить содержимое не может. Чарты в `vendor/charts` и
-бинарники проверяются по sha256 из `versions.env`, плагин Grafana — по
-подписи VictoriaMetrics. С прокси зеркала совместимы: containerd ходит к ним
+Переменные передавайте при каждом запуске — `./deploy.sh`, `make cluster`,
+`make add-worker`: без них применяется список по умолчанию (на всех узлах).
+
+**Почему зеркалу можно доверять.** Зеркалам разрешено только отдавать
+содержимое по digest (`capabilities = ["pull"]`): тег в digest переводит
+всегда сам реестр, а containerd сверяет с digest каждый манифест и слой.
+Образы этого развёртывания закреплены по digest (`make lint` это
+проверяет) и идут через зеркала целиком; образы kubeadm (control plane,
+pause, CoreDNS) указаны тегом — его разрешает registry.k8s.io, с зеркала
+(если задано) берётся только содержимое по этому digest. Зеркало может не
+отдать образ — тогда containerd идёт к следующему, — но подменить не
+может. Зеркала действуют на весь узел: любой образ docker.io идёт через
+них; образ по тегу (например, `kubectl run --image=nginx`) без доступа к
+самому Docker Hub не скачается — тег через зеркало не разрешается. Чарты в
+`vendor/charts` и бинарники проверяются по sha256 из `versions.env`, плагин
+Grafana — по подписи. С прокси зеркала совместимы: containerd ходит к ним
 через тот же прокси ([docs/operations.md](docs/operations.md#сеть-в-рф-зеркала-и-источники)).
 
 ### Несколько узлов
@@ -249,12 +259,18 @@ make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
 <IP> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local
 ```
 
-IP на узле и добавление строки (второй командой — на машине проверки, со
-своим IP):
+IP печатает команда на узле:
 
 ```bash
 kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].value}{"\n"}'
-echo "192.168.1.38 app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local" | sudo tee -a /etc/hosts
+```
+
+На машине проверки — этот адрес в `IP` (ниже — пример, подставьте свой) и
+строка в `/etc/hosts`:
+
+```bash
+IP=192.0.2.10
+echo "$IP app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local" | sudo tee -a /etc/hosts
 ```
 
 Сертификаты выпущены демо-CA: `make ca` пишет его в `ca.crt` (для

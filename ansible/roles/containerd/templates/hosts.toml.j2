@@ -1,15 +1,20 @@
 # {{ ansible_managed }}
 # kubeadm-gateway-observability registry mirrors (this line marks the file
 # as ours: it is removed when the registry has no mirrors any more).
-# Pulls from {{ item.registry }} try the mirrors below in this order and
-# then the registry itself (server). Images are pinned by digest and
-# containerd checks every manifest and layer against it, so a mirror can
-# make a pull fail but cannot change the image.
+# Pulls from {{ item.registry }} fetch content from the mirrors below in this
+# order and then from the registry itself (server). The mirrors only have
+# the "pull" capability: containerd asks them only for content addressed by
+# digest (a reference with a digest, or the manifests and layers a tag
+# resolved to) and checks every byte against that digest. A tag is always
+# resolved to a digest by the registry itself, never by a mirror, so a
+# mirror can make a pull fail or slow but cannot change which image runs.
 server = {{ item.server | tojson }}
 {% for mirror in item.mirrors %}
 
 [host.{{ mirror | tojson }}]
-  capabilities = ["pull", "resolve"]
-  # Give up on a mirror that does not answer (and go to the next one) soon.
+  capabilities = ["pull"]
+  # Connection set-up only: a mirror that cannot be reached within 10 s is
+  # skipped. A transfer that stalls midway is cancelled by the CRI image
+  # pull progress timeout (5 min without progress), then retried.
   dial_timeout = "10s"
 {% endfor %}
