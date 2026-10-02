@@ -28,7 +28,7 @@ vmui через тот же Gateway. Повторный запуск ничег�
 | Платформа | helmfile | Cilium (kube-proxy replacement, node IPAM, Hubble), local-path-provisioner |
 | Namespaces | чарт `charts/namespaces` | namespaces с Pod Security Admission (enforce): `restricted` везде, кроме `monitoring-node`, `logging-node` и `local-path-storage` (поды, которым нужен доступ к узлу, см. «Особенности») |
 | Сетевые политики | чарт `charts/network-policies` + NetworkPolicy в `charts/demo-app` | во всех наших namespaces входящий трафик запрещён по умолчанию, разрешено только нужное (см. «Особенности») |
-| Порты метрик на узле | Ansible, роль `node_firewall` | nftables: порты метрик Cilium и node-exporter доступны только с самого узла и из сети подов |
+| Порты метрик на узле | Ansible, роль `node_firewall` | nftables: порты метрик Cilium и node-exporter и API cilium-health доступны только с самого узла, из сети подов и с других узлов кластера |
 | TLS | cert-manager + чарт `charts/pki` | self-signed корень → CA `demo-ca` (ClusterIssuer) → сертификат `demo.local`, `*.demo.local` |
 | Вход | Envoy Gateway (CRD Gateway API — канал standard) + чарт `charts/gateway` | Gateway `public` на IP узла: HTTP 80 → 301 на HTTPS 443; маршруты, canary, зеркалирование (`RequestMirror`), заголовки (`RequestHeaderModifier`/`ResponseHeaderModifier`), таймауты HTTPRoute, политики; Envoy — 2 реплики с PodDisruptionBudget |
 | UI | чарт `charts/ui-routes` | маршруты к Grafana, Prometheus, Alertmanager и vmui на том же Gateway, basic auth, только нужные методы и пути |
@@ -736,7 +736,8 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
 Ключ воркера должен быть в `~/.ssh/authorized_keys` пользователя на воркере,
 а его host key — известен (один раз `ssh ubuntu@192.0.2.21`). Несколько
 воркеров — копией `ansible/inventory/multinode.example.yml`:
-`make add-worker INVENTORY=ansible/inventory/multinode.yml`.
+`make add-worker INVENTORY=ansible/inventory/multinode.yml` (а вывести всех
+воркеров такого inventory — `make remove-worker INVENTORY=… FORCE=1`).
 
 Как устроено:
 
@@ -746,13 +747,29 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
   удаляется сразу после `kubeadm join`, и сразу же удаляется из кластера
   (`kubeadm token delete`). В git, командную строку и вывод Ansible токен не
   попадает (`no_log`). Сертификат CA проверяется по хешу открытого ключа
-  (`caCertHashes`).
-- **Проверки до изменений.** Сначала проверяются SSH, ОС (Ubuntu, amd64) и
-  состояние узла; при любой проблеме команда останавливается, ничего не
-  изменив: воркер недоступен по SSH; WORKER — это сам control plane; на узле
-  есть свой control plane; узел уже в другом кластере (другой адрес
-  API-сервера или CA); имя узла уже занято; узел присоединялся раньше, но его
-  Node удалён. Сообщение объясняет, что сделать.
+  (`caCertHashes`). Если связь с воркером оборвалась посреди присоединения,
+  токен удалит следующий запуск (в начале и в конце `make add-worker`
+  удаляются все токены с описанием `kubeadm-gateway: join`), а не удалённый
+  никем живёт не дольше 15 минут. Токен самого `kubeadm init` тоже живёт
+  15 минут, а не 24 часа по умолчанию.
+- **Проверки до изменений.** Сначала проверяются SSH, ОС (Ubuntu, amd64; не
+  24.04 — предупреждение, как на control plane) и состояние узла; при любой
+  проблеме команда останавливается, ничего не изменив: воркер недоступен по
+  SSH; с воркера не открывается API-сервер (TCP 6443); WORKER — это сам
+  control plane; на узле есть свой control plane; узел уже в другом кластере
+  (другой адрес API-сервера или CA, в том числе от недоделанного join);
+  имена воркеров в inventory повторяются; имя узла уже занято в кластере;
+  узел присоединялся раньше, но его Node удалён. Сообщение объясняет, что
+  сделать.
+- **Прерванное присоединение.** Если `kubeadm join` этого кластера
+  остановился после своих preflight-проверок (обрыв сети, прерванный
+  запуск), на воркере остаются CA кластера, bootstrap-kubeconfig и
+  конфигурация kubelet, но нет `kubelet.conf`. Повторный `make add-worker`
+  распознаёт такой узел (CA совпадает с CA кластера), делает на нём
+  `kubeadm reset` и присоединяет заново.
+- **Cordoned-воркер** (`kubectl cordon`) остаётся таким: повторный
+  `make add-worker` проходит и только напоминает про `kubectl uncordon`;
+  при перераспределении реплик такие узлы не учитываются.
 - **Идемпотентность.** Присоединённый узел повторно не трогается: повторный
   `make add-worker` и `./deploy.sh` на control plane дают `changed=0`,
   ревизии Helm не меняются.
@@ -770,8 +787,15 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
 - **Порты метрик (nftables).** Под с другого узла ходит к портам узла с
   адресом своего узла (маскарадинг Cilium): Prometheus на control plane
   скрейпит node-exporter и Cilium воркера с адреса `192.0.2.10`, а не из
-  сети подов. Поэтому в таблицу `kubeadm_gateway_metrics` каждого узла
-  добавлены адреса остальных узлов кластера; для остальной сети порты
+  сети подов. Так же, с адреса узла, cilium-health проверяет соседей на
+  порту 4240. Поэтому в таблицу `kubeadm_gateway_metrics` воркера
+  добавлены адреса control plane и воркеров, известных на момент его
+  присоединения, а в таблицу control plane — адреса всех воркеров. Таблицы
+  уже присоединённых воркеров при добавлении следующего обновляются, только
+  если они тоже перечислены в inventory (multinode); с `WORKER=` — нет. Для
+  сбора метрик это не важно (Prometheus работает на control plane), а
+  проверки cilium-health между двумя воркерами без этого получают отказ —
+  перечисляйте всех воркеров в inventory. Для остальной сети порты
   по-прежнему закрыты (проверено с третьей машины: TCP reset на обоих узлах).
 - **NetworkPolicy** не менялись. Cilium различает трафик своего узла
   (`host`, всегда разрешён — пробы kubelet) и соседнего (`remote-node`),
@@ -792,7 +816,11 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
   выталкивают все новые на другой). Планировщик не переносит уже запущенные
   поды, поэтому `make add-worker` в конце перезапускает (rolling, с учётом
   PodDisruptionBudget) те Deployment со спредом по узлам, у которых все поды
-  на одном узле; если уже разнесены — ничего не делает.
+  на одном узле; если уже разнесены — ничего не делает. `ScheduleAnyway` —
+  пожелание, а не гарантия: планировщик учитывает и другие факторы (ресурсы
+  узлов, наличие образа). На стенде реплики каждый раз расходились 1/1; если
+  нет — `make verify` (шаг 9) это покажет, повторный `make add-worker`
+  перезапустит их снова.
 - **DaemonSet'ы** (Cilium, cilium-envoy, Fluentd, node-exporter) сами
   появляются на воркере: логи его подов идут в VictoriaLogs, метрики узла —
   в Prometheus. etcd-metrics-proxy — только на control plane.
@@ -803,10 +831,19 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
 - **`make remove-worker`**: drain (DaemonSet'ы пропускаются, PDB
   соблюдаются), сброс воркера тем же `scripts/destroy.sh`, что и
   `make destroy`, удаление Node, затем control plane забывает воркер
-  (nftables, одобритель). Узел с томами local-path команда отказывается
-  выводить (данные лежат только на нём). Недоступный по SSH воркер всё
-  равно выводится из кластера, сбросить его нужно позже вручную
-  (`sudo kubeadm reset`).
+  (nftables, одобритель). Хост трогается, только если он доказуемо воркер
+  этого кластера: его `kubelet.conf` смотрит в этот API-сервер, CA на нём
+  совпадает с CA кластера (sha256), Node ищется по адресам самого хоста (а
+  не по имени: у другой машины может быть такое же), и control plane на нём
+  нет. Иначе команда останавливается до drain: «Nothing has been changed».
+  Control plane и узел с томами local-path команда выводить отказывается
+  (данные лежат только на нём). Недоступный по SSH воркер ищется по адресу
+  из WORKER и всё равно выводится из кластера, сбросить его нужно позже
+  вручную (`sudo kubeadm reset`). На воркере после вывода остаётся то же,
+  что после `make destroy`: пакеты kubeadm/kubelet/kubectl (kubelet
+  остановлен), containerd и runc, кэш загрузок, sysctl и модули ядра, apt
+  pinning; стёрты состояние kubeadm и kubelet, Cilium, правила iptables,
+  таблица nftables, логи подов и состояние Fluentd.
 
 Проверено на стенде: control plane 4 vCPU / 8 ГБ + воркер 2 vCPU / 4 ГБ
 (Ubuntu 24.04.5). `make add-worker` — 1,5–2 мин (на воркере уже стояли
@@ -816,7 +853,13 @@ make remove-worker WORKER=192.0.2.21   # вывести воркер обрат�
 те же; перезагрузка воркера — через ~1 мин снова `Ready`, `make verify`
 зелёный; `make remove-worker` — около минуты, на воркере не осталось
 kubelet, Cilium и nftables-таблицы, одноузловой `make verify` зелёный
-(26 ✓).
+(26 ✓). Отказы и восстановление: хост вне кластера с тем же именем, что у
+узла кластера, — `remove-worker` ничего не трогает; хост с адресом узла, но
+с `kubelet.conf` другого кластера, — отказ до drain; прерванный join —
+повторный `make add-worker` сбрасывает остатки и присоединяет узел, забытый
+токен удаляется; cordoned-воркер — `make add-worker` проходит с
+`changed=0`; cilium-health между узлами — все проверки OK при закрытом для
+сети порте 4240.
 
 Ограничения: один control plane (etcd без HA: потеря control plane — потеря
 кластера); тома local-path привязаны к узлу, на котором созданы; воркеры —
@@ -919,11 +962,12 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   повышения привилегий, seccomp `RuntimeDefault`. Без токена — 401.
 - **Порты метрик на узле закрыты для сети.** Компоненты с host network слушают
   все адреса узла: Cilium — 9962 (cilium-agent), 9963 (оператор), 9964 (его Envoy),
-  9965 (Hubble), без аутентификации; node-exporter — 9100 и 8888 (`/healthz`
-  прокси). Роль Ansible `node_firewall` ставит свою таблицу nftables
-  (`inet kubeadm_gateway_metrics`, юнит `kubeadm-gateway-metrics-firewall`,
-  переживает перезагрузку): на эти порты пускают только сам узел и сеть
-  подов (`10.244.0.0/16`, откуда ходит Prometheus), остальным — TCP reset.
+  9965 (Hubble), 4240 (API cilium-health), без аутентификации; node-exporter
+  — 9100 и 8888 (`/healthz` прокси). Роль Ansible `node_firewall` ставит
+  свою таблицу nftables (`inet kubeadm_gateway_metrics`, юнит
+  `kubeadm-gateway-metrics-firewall`, переживает перезагрузку): на эти порты
+  пускают только сам узел, сеть подов (`10.244.0.0/16`, откуда ходит
+  Prometheus) и другие узлы кластера, если они есть, остальным — TCP reset.
   Остальные порты и правила (SSH, 6443, 80/443, Cilium) таблица не трогает.
   Выбрали nftables, а не host firewall Cilium: тот при первой же политике
   узла запрещает всё, что не разрешено явно (риск отрезать SSH и

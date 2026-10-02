@@ -13,6 +13,13 @@
 - name: Join the cluster
   when: not kubeadm_join_joined
   block:
+    # Left by a join of this cluster that stopped half-way (state.yml).
+    - name: Reset the remains of an interrupted join
+      ansible.builtin.command:
+        cmd: kubeadm reset --force --cri-socket {{ kubeadm_join_cri_socket }}
+      when: kubeadm_join_interrupted
+      changed_when: true
+
     - name: Compute the public key hash of the cluster CA
       ansible.builtin.shell:
         cmd: |
@@ -93,6 +100,15 @@
   retries: 24
   delay: 5
   changed_when: false
+
+# A cordoned worker (kubectl cordon, e.g. for maintenance) is left so:
+# uncordoning is the administrator's decision.
+- name: Report a cordoned worker
+  ansible.builtin.debug:
+    msg: >-
+      {{ kubeadm_join_node_name }} is cordoned: no new pods are placed on it until
+      `kubectl uncordon {{ kubeadm_join_node_name }}`.
+  when: (kubeadm_join_node_json.stdout | from_json).spec.unschedulable | default(false)
 
 - name: Label the node as a worker
   ansible.builtin.command:

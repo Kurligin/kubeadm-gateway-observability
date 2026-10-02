@@ -1,0 +1,22 @@
+---
+# Deletes every join token this role has created (description
+# "kubeadm-gateway: join ..."). Normally each one is deleted right after its
+# join; this catches one left behind by a run that lost the connection in
+# between. Runs on the control plane; prints only how many were deleted.
+- name: Delete leftover join tokens
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ids="$(kubeadm token list --output json | jq -r 'select((.description // "") | startswith("kubeadm-gateway: join"))
+        | .token | split(".") | first')"
+      count=0
+      for id in ${ids}; do
+        kubeadm token delete "${id}" >/dev/null
+        count=$((count + 1))
+      done
+      echo "${count}"
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_join_admin_kubeconfig }}"
+  register: kubeadm_join_token_cleanup
+  changed_when: kubeadm_join_token_cleanup.stdout | int > 0

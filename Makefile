@@ -114,7 +114,7 @@ help: ## Show this help
 	@printf '  WORKER=<address>  worker for add-worker / remove-worker (WORKER_USER, SSH_KEY: login over SSH)\n'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
-	@printf '  FORCE=1           confirm `make destroy`\n'
+	@printf '  FORCE=1           confirm `make destroy` (and `make remove-worker` of a whole INVENTORY)\n'
 
 deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
 	@$(MAKE) cluster
@@ -135,8 +135,14 @@ add-worker: $(ANSIBLE_PLAYBOOK) ## Join a worker node over SSH: WORKER=<address>
 	@$(call ansible_run,$(NODES_INVENTORY),ansible/add-worker.yml)
 	@printf '\n\033[1;32mWorker(s) joined.\033[0m Check: kubectl get nodes -o wide; make verify\n'
 
+# With an inventory every host of its "workers" group is removed, so that
+# needs FORCE=1 as a confirmation.
 remove-worker: $(ANSIBLE_PLAYBOOK) ## Drain, delete and reset a worker node: WORKER=<address>
 	@$(require_worker)
+	@if [[ -z '$(strip $(WORKER))' && "$(FORCE)" != "1" ]]; then \
+		echo 'This removes every host of the "workers" group of $(INVENTORY). Re-run with FORCE=1, or give one worker with WORKER=<address>.' >&2; \
+		exit 1; \
+	fi
 	@$(call ansible_run,$(NODES_INVENTORY),ansible/remove-worker.yml)
 
 # ensure-*.sh run after every apply: helmfile hooks fire only for changed

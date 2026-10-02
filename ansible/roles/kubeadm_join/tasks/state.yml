@@ -38,6 +38,41 @@
       {{ kubeadm_join_api_server }}). WORKER must be another machine. Nothing has been changed.
     quiet: true
 
+- name: Warn about an untested Ubuntu release
+  ansible.builtin.debug:
+    msg: "Tested on Ubuntu 24.04, {{ kubeadm_join_node_name }} runs {{ ansible_facts['distribution_version'] }}; continuing."
+  when: ansible_facts['distribution_version'] != '24.04'
+
+- name: Check that node names are unique in the inventory
+  ansible.builtin.assert:
+    that:
+      - kubeadm_join_names | length == kubeadm_join_names | unique | length
+    fail_msg: >-
+      Several workers of the inventory have the same host name ({{ kubeadm_join_names | join(', ') }}); node names
+      must be unique. Change the host names. Nothing has been changed.
+    quiet: true
+  vars:
+    kubeadm_join_names: >-
+      {{ ansible_play_hosts | map('extract', hostvars, ['ansible_facts', 'nodename']) | map('lower') | list }}
+  run_once: true
+
+# kubeadm join and the kubelet talk to the API server directly.
+- name: Check that the worker reaches the API server
+  ansible.builtin.wait_for:
+    host: "{{ kubeadm_join_api_server.split(':') | first }}"
+    port: "{{ kubeadm_join_api_server.split(':') | last | int }}"
+    timeout: 10
+  register: kubeadm_join_api_reachable
+  ignore_errors: true
+
+- name: Explain an API server the worker cannot reach
+  ansible.builtin.fail:
+    msg: >-
+      {{ kubeadm_join_node_name }} cannot connect to the API server {{ kubeadm_join_api_server }} (TCP). A firewall
+      between the nodes must allow TCP {{ kubeadm_join_api_server.split(':') | last }} to the control plane, 10250
+      (kubelet) and 8472/UDP (Cilium VXLAN) between the nodes. Nothing has been changed.
+  when: kubeadm_join_api_reachable is failed
+
 - name: Check the node address of the worker
   ansible.builtin.assert:
     that:
@@ -74,6 +109,19 @@
     path: "{{ kubeadm_join_kubelet_kubeconfig }}"
   register: kubeadm_join_kubelet_conf
 
+- name: Read the cluster CA of the worker
+  ansible.builtin.stat:
+    path: "{{ kubeadm_join_ca_cert }}"
+    checksum_algorithm: sha256
+  register: kubeadm_join_worker_ca
+
+- name: Read the cluster CA of the control plane
+  ansible.builtin.stat:
+    path: "{{ kubeadm_join_ca_cert }}"
+    checksum_algorithm: sha256
+  delegate_to: "{{ kubeadm_join_control_plane }}"
+  register: kubeadm_join_cluster_ca
+
 - name: Compare the cluster the worker belongs to with this one
   when: kubeadm_join_kubelet_conf.stat.exists
   block:
@@ -81,19 +129,6 @@
       ansible.builtin.slurp:
         src: "{{ kubeadm_join_kubelet_kubeconfig }}"
       register: kubeadm_join_kubelet_conf_content
-
-    - name: Read the cluster CA of the worker
-      ansible.builtin.stat:
-        path: "{{ kubeadm_join_ca_cert }}"
-        checksum_algorithm: sha256
-      register: kubeadm_join_worker_ca
-
-    - name: Read the cluster CA of the control plane
-      ansible.builtin.stat:
-        path: "{{ kubeadm_join_ca_cert }}"
-        checksum_algorithm: sha256
-      delegate_to: "{{ kubeadm_join_control_plane }}"
-      register: kubeadm_join_cluster_ca
 
     - name: Refuse a worker of another cluster
       ansible.builtin.assert:
@@ -112,6 +147,32 @@
         kubeadm_join_worker_server: >-
           {{ (kubeadm_join_kubelet_conf_content.content | b64decode | from_yaml).clusters[0].cluster.server }}
 
+# A join that stopped after its preflight checks (network error, run
+# interrupted) leaves the cluster CA, the bootstrap kubeconfig and the
+# kubelet configuration behind, but no kubelet kubeconfig; a new join then
+# fails its preflight checks. Such a host is reset first (tasks/main.yml),
+# but only if what it left belongs to this cluster.
+- name: Look for traces of an interrupted join
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ kubeadm_join_bootstrap_kubeconfig }}"
+    - "{{ kubeadm_join_kubelet_config }}"
+  register: kubeadm_join_traces
+  when: not kubeadm_join_kubelet_conf.stat.exists
+
+- name: Refuse traces of a join to another cluster
+  ansible.builtin.assert:
+    that:
+      - kubeadm_join_worker_ca.stat.checksum | default(kubeadm_join_cluster_ca.stat.checksum)
+        == kubeadm_join_cluster_ca.stat.checksum
+    fail_msg: >-
+      {{ kubeadm_join_node_name }} has the CA of another cluster ({{ kubeadm_join_ca_cert }}) from an earlier,
+      unfinished join. Run `sudo kubeadm reset` on it if it is no longer needed, then add it again.
+      Nothing has been changed.
+    quiet: true
+  when: not kubeadm_join_kubelet_conf.stat.exists
+
 - name: Look for the node in the cluster
   ansible.builtin.command:
     cmd: "kubectl get node {{ kubeadm_join_node_name }} --output name --ignore-not-found"
@@ -124,6 +185,10 @@
 - name: Evaluate the join state
   ansible.builtin.set_fact:
     kubeadm_join_joined: "{{ kubeadm_join_kubelet_conf.stat.exists }}"
+    kubeadm_join_interrupted: >-
+      {{ not kubeadm_join_kubelet_conf.stat.exists
+         and (kubeadm_join_worker_ca.stat.exists
+              or kubeadm_join_traces.results | selectattr('stat.exists') | list | length > 0) }}
     kubeadm_join_node_exists: "{{ kubeadm_join_node_object.stdout | length > 0 }}"
 
 - name: Refuse a joined worker whose node was deleted

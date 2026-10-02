@@ -23,6 +23,8 @@ kubeadm_join_serving_cert_retries: 36
 
 # Files kubeadm writes on a worker (and on a control plane).
 kubeadm_join_kubelet_kubeconfig: /etc/kubernetes/kubelet.conf
+kubeadm_join_bootstrap_kubeconfig: /etc/kubernetes/bootstrap-kubelet.conf
+kubeadm_join_kubelet_config: /var/lib/kubelet/config.yaml
 kubeadm_join_ca_cert: /etc/kubernetes/pki/ca.crt
 kubeadm_join_manifests_dir: /etc/kubernetes/manifests
 kubeadm_join_kubelet_serving_cert: /var/lib/kubelet/pki/kubelet-server-current.pem

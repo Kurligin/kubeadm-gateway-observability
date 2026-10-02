@@ -10,3 +10,6 @@
 cluster_nodes_file: /etc/kubeadm-gateway/workers.json
 # Node names to forget (set by `make remove-worker`).
 cluster_nodes_removed: []
+# Remember the workers of the current inventory; `make remove-worker` turns
+# this off, so that a host it refused or did not find is not remembered.
+cluster_nodes_from_inventory: true

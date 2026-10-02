@@ -5,6 +5,8 @@
 #   8888  node-exporter kube-rbac-proxy /healthz
 #   9962  cilium-agent      9963  cilium-operator
 #   9964  cilium-envoy      9965  Hubble metrics
+#   4240  cilium-health API (health probes between the nodes, from node
+#         addresses, so it stays open to the other nodes of the cluster)
 # Only the node itself, pods (Prometheus) and the other nodes of the cluster
 # may connect; anything else gets a TCP reset. Nothing else on the node is
 # touched.
@@ -15,6 +17,7 @@ node_firewall_metrics_ports:
   - 9963
   - 9964
   - 9965
+  - 4240
 
 # Sources allowed besides the node's own addresses.
 node_firewall_allowed_cidrs:

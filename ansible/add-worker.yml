@@ -5,6 +5,17 @@
 # worker given by WORKER=<address>, or a copy of multinode.example.yml).
 # Idempotent: a worker that has already joined is left as it is.
 
+- name: Check the inventory
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: Check that the inventory has workers
+      ansible.builtin.assert:
+        that:
+          - groups['workers'] | default([]) | length > 0
+        fail_msg: The inventory has no "workers" group (see ansible/inventory/multinode.example.yml). Nothing has been changed.
+        quiet: true
+
 - name: Check the connection to the workers
   hosts: workers
   gather_facts: false
@@ -53,6 +64,16 @@
         name: kubeadm_join
         tasks_from: state.yml
 
+- name: Delete join tokens left by an interrupted run
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Delete leftover join tokens
+      ansible.builtin.include_role:
+        name: kubeadm_join
+        tasks_from: tokens.yml
+
 # The control plane first, with the workers in the inventory: their names and
 # addresses are remembered (role cluster_nodes), its metrics firewall lets
 # them in and its kubelet certificate approver knows them.
@@ -96,12 +117,13 @@
     # Right after a join the node is Ready a moment before it is really
     # usable: the node lifecycle controller removes its not-ready taint and
     # the DaemonSets (Cilium, Fluentd, node-exporter) start there. Pods
-    # restarted earlier all land on the old node again.
+    # restarted earlier all land on the old node again. Cordoned nodes
+    # (kubectl cordon, maintenance) are left out: they take no new pods.
     - name: Wait until every node is untainted and runs its DaemonSet pods
       ansible.builtin.shell:
         cmd: |
           set -o pipefail
-          kubectl get nodes --output json | jq -e '[.items[].spec.taints[]?
+          kubectl get nodes --output json | jq -e '[.items[] | select(.spec.unschedulable != true) | .spec.taints[]?
             | select(.effect != "PreferNoSchedule" and .key != "node-role.kubernetes.io/control-plane")] | length == 0' >/dev/null
           kubectl get daemonsets --all-namespaces --output json | jq -e '[.items[]
             | select(.status.numberReady < .status.desiredNumberScheduled)] | length == 0' >/dev/null
@@ -152,3 +174,13 @@
         KUBECONFIG: /etc/kubernetes/admin.conf
       loop: "{{ add_worker_unspread.stdout_lines }}"
       changed_when: true
+
+- name: Delete join tokens left by this run
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Delete leftover join tokens
+      ansible.builtin.include_role:
+        name: kubeadm_join
+        tasks_from: tokens.yml

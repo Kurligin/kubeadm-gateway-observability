@@ -13,6 +13,13 @@
       ansible.builtin.setup:
       ignore_unreachable: true
 
+    - name: Report a node that cannot be reached
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_host | default(inventory_hostname) }} cannot be reached over SSH; it is skipped, and what the
+          control plane remembers about it (its names and addresses) is kept.
+      when: ansible_facts['nodename'] is not defined
+
 # Node preparation and kubeadm control plane bootstrap.
 # The platform layer (Cilium, storage, ...) is installed by helmfile afterwards.
 - name: Prepare the node and bootstrap the Kubernetes control plane

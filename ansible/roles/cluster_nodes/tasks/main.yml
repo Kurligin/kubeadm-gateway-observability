@@ -31,7 +31,7 @@
                hostvars[item]['ansible_facts']['default_ipv6']['address'] | default(''),
                hostvars[item]['node_ip'] | default('')]
               | reject('equalto', '') | unique | list) }) }}
-  loop: "{{ groups['workers'] | default([]) }}"
+  loop: "{{ groups['workers'] | default([]) if cluster_nodes_from_inventory | bool else [] }}"
   when: hostvars[item]['ansible_facts']['nodename'] is defined
 
 - name: Forget removed worker nodes

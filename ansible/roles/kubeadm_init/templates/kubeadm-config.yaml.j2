@@ -3,6 +3,17 @@
 # running cluster.
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
+# The token kubeadm init creates is only for joining nodes; workers get a
+# one-time token of their own (`make add-worker`), so this one expires soon
+# instead of after the default 24 hours.
+bootstrapTokens:
+  - description: kubeadm init (expires soon; make add-worker creates its own tokens)
+    ttl: 15m0s
+    usages:
+      - signing
+      - authentication
+    groups:
+      - system:bootstrappers:kubeadm:default-node-token
 localAPIEndpoint:
   advertiseAddress: {{ kubeadm_init_node_ip }}
   bindPort: {{ k8s_api_server_port }}

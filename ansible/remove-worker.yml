@@ -2,15 +2,34 @@
 # `make remove-worker`: takes the hosts of group "workers" out of the
 # cluster: drain, reset the host (scripts/destroy.sh, the same cleanup as
 # `make destroy`), delete the Node, then the control plane forgets them
-# (metrics firewall, kubelet certificate approver). A worker that cannot be
-# reached any more is still drained and deleted; resetting it is then left
-# to whoever brings it back. Pods with local-path volumes on the worker
-# would lose their data, so such a worker is refused.
+# (metrics firewall, kubelet certificate approver).
+#
+# Nothing is touched unless the host provably is a worker of this cluster:
+# its kubelet talks to this API server with this cluster's CA, the Node is
+# found by the host's own addresses (never by host name alone: another
+# machine may share it), and the host runs no control plane. Otherwise the
+# run stops before any drain. A worker that cannot be reached any more is
+# found by its address, drained and deleted, but not reset. Pods with
+# local-path volumes on the worker would lose their data, so such a worker
+# is refused.
 
-- name: Find the worker nodes
+- name: Check the inventory
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: Check that the inventory has workers
+      ansible.builtin.assert:
+        that:
+          - groups['workers'] | default([]) | length > 0
+        fail_msg: The inventory has no "workers" group (see ansible/inventory/multinode.example.yml). Nothing has been changed.
+        quiet: true
+
+- name: Find the worker nodes and check that they belong to this cluster
   hosts: workers
   gather_facts: false
   become: false
+  # One host that is not provably ours stops the run before any drain.
+  max_fail_percentage: 0
   tasks:
     - name: Gather facts of the worker
       ansible.builtin.setup:
@@ -22,73 +41,118 @@
       ansible.builtin.set_fact:
         remove_worker_reachable: "{{ not (remove_worker_setup.unreachable | default(false)) }}"
 
+    - name: Read the API server address and the CA of the cluster
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl config view --minify --output jsonpath='{.clusters[0].cluster.server}{"\n"}'
+          sha256sum /etc/kubernetes/pki/ca.crt | cut -d' ' -f1
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      become: true
+      register: remove_worker_cluster
+      changed_when: false
+
+    # The Node is looked up by the addresses of the host itself (or, if it
+    # cannot be reached, by the address it is reached at), not by name.
+    - name: Find the node of the worker in the cluster
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl get nodes --output json | jq -r --argjson ips "${HOST_ADDRESSES}" '.items[]
+            | select(any(.status.addresses[]; .type == "InternalIP" and (.address as $a | $ips | index($a))))
+            | "\(.metadata.name) \(.metadata.labels | has("node-role.kubernetes.io/control-plane"))"'
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+        HOST_ADDRESSES: >-
+          {{ (ansible_facts['all_ipv4_addresses'] if remove_worker_reachable else [ansible_host | default(inventory_hostname)])
+             | to_json }}
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      become: true
+      register: remove_worker_node_cmd
+      changed_when: false
+
+    - name: Refuse an ambiguous or control plane node
+      ansible.builtin.assert:
+        that:
+          - remove_worker_node_cmd.stdout_lines | length <= 1
+          - remove_worker_node_cmd.stdout_lines | select('search', ' true$') | list | length == 0
+        fail_msg: >-
+          {{ ansible_host | default(inventory_hostname) }} matches {{ remove_worker_node_cmd.stdout_lines | map('split', ' ')
+          | map('first') | join(', ') }}: not exactly one worker node (a control plane node is never removed).
+          Nothing has been changed.
+        quiet: true
+
+    - name: Read the Kubernetes state of the worker
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          server=""
+          if [[ -f /etc/kubernetes/kubelet.conf ]]; then
+            server="$(awk '$1 == "server:" { print $2; exit }' /etc/kubernetes/kubelet.conf)"
+          fi
+          ca=""
+          if [[ -f /etc/kubernetes/pki/ca.crt ]]; then
+            ca="$(sha256sum /etc/kubernetes/pki/ca.crt | cut -d' ' -f1)"
+          fi
+          control_plane=false
+          if [[ -f /etc/kubernetes/admin.conf ]] || compgen -G '/etc/kubernetes/manifests/*.yaml' >/dev/null; then
+            control_plane=true
+          fi
+          jq -n --arg server "${server}" --arg ca "${ca}" --argjson cp "${control_plane}" \
+            '{server: $server, ca: $ca, control_plane: $cp}'
+        executable: /bin/bash
+      become: true
+      register: remove_worker_host_state
+      changed_when: false
+      when: remove_worker_reachable
+
+    # Ours: the kubelet talks to this API server with this cluster's CA
+    # (joined), or a join of this cluster stopped half-way (our CA, no
+    # kubelet kubeconfig yet), and the host runs no control plane.
+    - name: Decide whether the worker belongs to this cluster
+      ansible.builtin.set_fact:
+        remove_worker_ours: >-
+          {{ remove_worker_reachable
+             and not remove_worker_host.control_plane
+             and remove_worker_host.ca == remove_worker_cluster.stdout_lines[1]
+             and remove_worker_host.server in ['', remove_worker_cluster.stdout_lines[0]] }}
+        remove_worker_node: "{{ (remove_worker_node_cmd.stdout_lines | first | default('')).split(' ') | first }}"
+      vars:
+        remove_worker_host: "{{ remove_worker_host_state.stdout | default('{}') | from_json }}"
+
+    - name: Refuse a host that is not provably a worker of this cluster
+      ansible.builtin.fail:
+        msg: >-
+          {{ ansible_host }} has the address of node {{ remove_worker_node }}, but the host itself is not a worker
+          of this cluster (its kubelet does not talk to {{ remove_worker_cluster.stdout_lines[0] }} with this
+          cluster's CA, or it runs a control plane). Check WORKER. Nothing has been changed.
+      when: remove_worker_reachable and remove_worker_node | length > 0 and not remove_worker_ours
+
+    # The control plane forgets the worker by this name: the Node's, or the
+    # host name of a half-joined host of this cluster. Nothing for a host
+    # that is not ours: a real worker may share its host name.
+    - name: Remember what to remove
+      ansible.builtin.set_fact:
+        remove_worker_reset: "{{ remove_worker_ours }}"
+        remove_worker_name: >-
+          {{ remove_worker_node or (ansible_facts['nodename'] | lower if remove_worker_ours else '') }}
+
     - name: Report an unreachable worker
       ansible.builtin.debug:
         msg: >-
           {{ ansible_host | default(inventory_hostname) }} cannot be reached over SSH: it is drained and deleted
           from the cluster, but not reset. Before it joins any cluster again, run `sudo kubeadm reset` on it
           (or `make destroy FORCE=1` from a copy of this repository).
-      when: not remove_worker_reachable
-
-    # By host name if the worker answers, else by its address.
-    - name: Find the node of the worker in the cluster
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          kubectl get nodes --output json | jq -r --arg name "${NODE_NAME}" --arg ip "${NODE_ADDRESS}" '.items[]
-            | select(if $name != "" then .metadata.name == $name
-                     else any(.status.addresses[]; .type == "InternalIP" and .address == $ip) end)
-            | .metadata.name'
-        executable: /bin/bash
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-        NODE_NAME: "{{ ansible_facts['nodename'] | default('') | lower }}"
-        NODE_ADDRESS: "{{ ansible_host | default(inventory_hostname) }}"
-      delegate_to: "{{ groups['control_plane'][0] }}"
-      become: true
-      register: remove_worker_node_cmd
-      changed_when: false
-
-    # The control plane forgets the worker by this name, also when it is
-    # not (or no longer) a node of the cluster.
-    - name: Remember the node name
-      ansible.builtin.set_fact:
-        remove_worker_node: "{{ remove_worker_node_cmd.stdout | trim }}"
-        remove_worker_name: >-
-          {{ (remove_worker_node_cmd.stdout | trim) or (ansible_facts['nodename'] | default('') | lower) }}
-
-    # A join that failed half-way (or a Node deleted by hand) leaves a
-    # kubelet of this cluster on the worker without a Node: reset it too.
-    - name: Read the API server of the cluster
-      ansible.builtin.command:
-        cmd: kubectl config view --minify --output jsonpath={.clusters[0].cluster.server}
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      delegate_to: "{{ groups['control_plane'][0] }}"
-      become: true
-      register: remove_worker_api_server
-      changed_when: false
-
-    - name: Read the kubelet kubeconfig of the worker
-      ansible.builtin.slurp:
-        src: /etc/kubernetes/kubelet.conf
-      become: true
-      register: remove_worker_kubelet_conf
-      failed_when: false
-      when: remove_worker_reachable
-
-    - name: Remember whether the worker belongs to this cluster
-      ansible.builtin.set_fact:
-        remove_worker_joined: >-
-          {{ remove_worker_node | length > 0
-             or ('content' in remove_worker_kubelet_conf
-                 and (remove_worker_kubelet_conf.content | b64decode | from_yaml).clusters[0].cluster.server
-                     == remove_worker_api_server.stdout) }}
+      when: not remove_worker_reachable and remove_worker_node | length > 0
 
     - name: Report a worker that is not in the cluster
       ansible.builtin.debug:
         msg: "{{ ansible_host | default(inventory_hostname) }} is not a node of this cluster; nothing to remove."
-      when: not remove_worker_joined
+      when: remove_worker_node | length == 0 and not remove_worker_reset
 
 - name: Drain, reset and delete the worker nodes
   hosts: workers
@@ -156,7 +220,7 @@
     - name: Reset the worker
       ansible.builtin.script:
         cmd: ../scripts/destroy.sh
-      when: remove_worker_reachable and remove_worker_joined
+      when: remove_worker_reset
       changed_when: true
 
     - name: Delete the node
@@ -174,6 +238,7 @@
   tasks:
     - name: Collect the removed node names
       ansible.builtin.set_fact:
+        cluster_nodes_from_inventory: false
         cluster_nodes_removed: >-
           {{ groups['workers'] | default([]) | map('extract', hostvars, 'remove_worker_name')
              | select | list }}
