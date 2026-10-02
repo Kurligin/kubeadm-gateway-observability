@@ -11,7 +11,11 @@
 #   VM_CPUS    vCPUs (default 4; 2 is the minimum)
 #   VM_MEMORY  RAM in MiB (default 8192; 4096 is the minimum)
 #   VM_IP      address in the private network (default 192.168.56.10)
-#   HTTP_PROXY, HTTPS_PROXY, NO_PROXY  passed to ./deploy.sh if set
+#   HTTP_PROXY, HTTPS_PROXY, NO_PROXY  passed to ./deploy.sh if set (an
+#              address the VM can reach: 127.0.0.1 of the host is not)
+#
+# On Windows, run vagrant from Git Bash or WSL (rsync comes from MSYS2 or
+# Cygwin); .gitattributes keeps LF line endings in the checkout.
 #
 # `vagrant provision` deploys again (idempotent); after changing files on
 # the host, `vagrant rsync` copies them into the VM first.
@@ -63,7 +67,9 @@ Vagrant.configure("2") do |config|
     env: proxy_env.merge("NODE_IP" => VM_IP), inline: <<~SHELL
       set -euo pipefail
       cd #{REPO_DIR}
-      ./deploy.sh
+      # Through bash: works even if the executable bit was lost on the way
+      # (e.g. a checkout on a Windows file system).
+      bash ./deploy.sh
     SHELL
 
   config.vm.post_up_message = <<~MESSAGE
@@ -72,12 +78,17 @@ Vagrant.configure("2") do |config|
     Check inside the VM:
       vagrant ssh -c 'cd kubeadm-gateway-observability && make verify'
 
-    Check from this machine (needs curl and jq):
+    Check from this machine, in bash (Linux, macOS, Git Bash or WSL on Windows;
+    verify.sh needs curl and jq):
       vagrant ssh --no-tty -c 'cd kubeadm-gateway-observability && make ca >/dev/null && cat ca.crt' > ca.crt
       curl --cacert ca.crt --resolve app.demo.local:443:#{VM_IP} https://app.demo.local/
       GATEWAY_IP=#{VM_IP} CA_FILE=ca.crt \\
         UI_PASSWORD="$(vagrant ssh --no-tty -c 'kubectl -n gateway get secret ui-basic-auth -o jsonpath={.data.password} | base64 -d')" \\
         ./scripts/verify.sh
+
+    In PowerShell, write the certificate without the UTF-16 of ">", then use curl.exe:
+      vagrant ssh --no-tty -c 'cd kubeadm-gateway-observability && make ca >/dev/null && cat ca.crt' | Set-Content -Encoding ascii ca.crt
+      curl.exe --cacert ca.crt --resolve app.demo.local:443:#{VM_IP} https://app.demo.local/
 
     Passwords and UI addresses: vagrant ssh -c 'cd kubeadm-gateway-observability && make ui'
   MESSAGE

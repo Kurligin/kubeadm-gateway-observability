@@ -185,7 +185,17 @@ docker.angie.software), grafana.com. Повторный запуск без пр
 Нужно: amd64 (x86_64) с аппаратной виртуализацией, Vagrant ≥ 2.4 и
 VirtualBox ≥ 7 или libvirt/KVM с плагином `vagrant-libvirt`, `rsync`,
 ~8 ГБ свободной памяти и ~30 ГБ диска. **Apple Silicon (arm64) не
-поддерживается**: решение и образы — только amd64.
+поддерживается**: решение и образы — только amd64. Берите последний
+Vagrant: каждая его версия поддерживает VirtualBox только до определённой
+версии.
+
+На Windows `vagrant` запускайте из Git Bash (rsync — из MSYS2 или Cygwin в
+`PATH`) или из WSL (`VAGRANT_WSL_ENABLE_WINDOWS_ACCESS=1`, репозиторий на
+`/mnt/c/...`). `.gitattributes` сохраняет в checkout окончания строк LF,
+поэтому скрипты в ВМ работают и после `git clone` на Windows. Команды проверки
+с хоста ниже — для bash; для PowerShell `vagrant up` печатает свой вариант
+(сертификат пишется через `Set-Content -Encoding ascii`, а не `>`, иначе
+выйдет UTF-16).
 
 ```bash
 vagrant up                        # VirtualBox
@@ -205,7 +215,9 @@ curl --cacert ca.crt --resolve app.demo.local:443:192.168.56.10 https://app.demo
 
 `vagrant provision` повторяет развёртывание (идемпотентно), после правок
 на хосте — сначала `vagrant rsync`. `HTTP(S)_PROXY`/`NO_PROXY`, если заданы,
-передаются в `./deploy.sh`. У box диск 64 ГБ (тонкий), корневой раздел
+передаются в `./deploy.sh`; прокси на `127.0.0.1` хоста из ВМ недоступен —
+укажите адрес хоста, видимый из ВМ (например, `http://192.168.56.1:3128`
+для сети по умолчанию), и проверьте, что прокси слушает этот адрес. У box диск 64 ГБ (тонкий), корневой раздел
 в госте — 31 ГБ.
 
 Box и сам Vagrant раздаёт HashiCorp; из некоторых сетей (в том числе из
@@ -224,8 +236,8 @@ vagrant box add box.json
 vagrant plugin install vagrant-libvirt --plugin-clean-sources --plugin-source https://rubygems.org
 ```
 
-Проверено с libvirt (Vagrant 2.4.9, vagrant-libvirt 0.12.2, вложенная
-виртуализация на ВМ Ubuntu 24.04): `VM_CPUS=2 VM_MEMORY=4096 vagrant up
+Проверено с libvirt (Vagrant 2.4.9, vagrant-libvirt 0.12.2, libvirt 10.0.0
+и QEMU 8.2 из Ubuntu 24.04, вложенная виртуализация на ВМ Ubuntu 24.04): `VM_CPUS=2 VM_MEMORY=4096 vagrant up
 --provider=libvirt` — 12,7 мин до готового решения, `make verify` в ВМ —
 26 ✓ и 1 пропуск (порт метрик Cilium с самого узла не проверить), с хоста
 по адресу 192.168.56.10 — 21 ✓, остальные 6 проверок требуют kubectl и
@@ -246,7 +258,7 @@ VirtualBox у нас не было.
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
 | `make images` | после `make cluster`: скачать в containerd все образы из `images.txt` (по digest) и образы control plane kubeadm; уже скачанные пропускаются |
 | `make images-list` | пересобрать `images.txt` из отрендеренных манифестов (после смены версий в `versions.env`) |
-| `make lint-deps && make lint` | без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален; kubeconform, trivy config и kube-linter по отрендеренным манифестам (см. «CI/CD») |
+| `make lint-deps && make lint` | только Ubuntu amd64 (на macOS и других ОС — внутри ВМ `vagrant up`), без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален; kubeconform, trivy config и kube-linter по отрендеренным манифестам (см. «CI/CD») |
 
 ## Проверка
 
@@ -708,7 +720,8 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 
 - [`lint`](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/lint.yml)
   ([`.github/workflows/lint.yml`](.github/workflows/lint.yml)) — на каждый
-  push и pull request: `make lint-deps && make lint`, то есть всё, что
+  push и на pull request из форков (PR из веток репозитория уже проверены
+  push'ем): `make lint-deps && make lint`, то есть всё, что
   проверяется локально, и падает, если какая-то проверка пропущена.
   Проверки отрендеренных манифестов (`helmfile template`, без кластера,
   [`scripts/check-manifests.sh`](scripts/check-manifests.sh)):
@@ -726,10 +739,12 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
     единичные исключения — аннотацией на самом объекте с причиной.
 
   Версии и sha256 инструментов — в `versions.env`, actions закреплены по
-  SHA коммита, у токена только чтение.
+  SHA коммита (их обновления раз в неделю предлагает Dependabot,
+  [`.github/dependabot.yml`](.github/dependabot.yml), без автослияния), у
+  токена только чтение.
 - [`e2e`](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/e2e.yml)
   ([`.github/workflows/e2e.yml`](.github/workflows/e2e.yml)) — на push в
-  `main` (и в рабочую ветку `ci-dev`) и вручную: на чистом раннере, как эксперт: `./deploy.sh` (кластер
+  `main` и вручную: на чистом раннере, как эксперт: `./deploy.sh` (кластер
   kubeadm на самом раннере) → `make verify` → проверка таймера одобрения
   сертификатов kubelet → повторный `./deploy.sh`, который ничего не должен
   изменить (Ansible `changed=0`, helmfile не обновил ни одного релиза,

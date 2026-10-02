@@ -1,0 +1,11 @@
+---
+# Weekly pull requests that bump the actions pinned by commit SHA in
+# .github/workflows (with the version comment). No automatic merge: every
+# update goes through the lint and e2e workflows and a review.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

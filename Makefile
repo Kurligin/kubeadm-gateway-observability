@@ -215,7 +215,9 @@ LINT_TOOLS := \
 		$(KUBE_LINTER_SHA256) kube-linter
 
 # helm and helmfile are installed into .venv too (the same versions `make
-# cluster` installs on the node), so that `make lint` runs on any amd64 Linux.
+# cluster` installs on the node), so that `make lint` needs no cluster. Like
+# deploy.sh (which prepares .venv), it runs on Ubuntu amd64 only; elsewhere,
+# run it inside the Vagrant VM (see README).
 lint-deps: $(ANSIBLE_PLAYBOOK) ## Install lint tools into .venv
 	$(VENV)/bin/pip install --quiet --disable-pip-version-check -r requirements-dev.txt -c requirements.txt
 	@set -- $(LINT_TOOLS); \

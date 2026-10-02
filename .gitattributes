@@ -1,0 +1,10 @@
+# Every text file is checked out with LF line endings, also on Windows
+# (core.autocrlf would otherwise turn shell scripts into "bash\r").
+* text=auto eol=lf
+
+# Binary files: never converted or diffed as text.
+*.png binary
+*.jpg binary
+*.gz binary
+*.tgz binary
+*.box binary

@@ -9,15 +9,17 @@ name: e2e
 
 on:
   push:
-    branches: [main, ci-dev]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer run replaces an older one of the same branch, except on main,
+# where every commit gets its full run.
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
   run:
@@ -58,15 +60,20 @@ jobs:
       - name: Verify (make verify)
         run: make verify 2>&1 | tee "${LOG_DIR}/verify-1.log"
 
+      # The timer is enabled and active, and its service really runs and
+      # exits 0 (a new start time and the exit status of its process).
       - name: Kubelet certificate approver timer is active
         run: |
           unit=kubeadm-gateway-kubelet-cert-approver
           systemctl is-enabled "${unit}.timer"
           systemctl is-active "${unit}.timer"
+          show() { systemctl show --value --property="$1" "${unit}.service"; }
+          before="$(show InactiveExitTimestampMonotonic)"
           sudo systemctl start "${unit}.service"
-          result="$(systemctl show --property=Result --value "${unit}.service")"
-          echo "${unit}.service: ${result}"
-          [[ ${result} == success ]]
+          after="$(show InactiveExitTimestampMonotonic)"
+          status="$(show ExecMainStatus)"
+          echo "${unit}.service: started at monotonic ${before} -> ${after}, exit status ${status}"
+          [[ ${after} != "${before}" && ${after} != 0 && ${status} == 0 ]]
 
       - name: Save Helm release revisions
         run: ./scripts/check-idempotency.sh snapshot "${LOG_DIR}/revisions-before.json"
