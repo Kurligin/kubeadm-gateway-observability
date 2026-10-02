@@ -33,9 +33,15 @@
     url: "{{ containerd_release_url }}"
     dest: "{{ download_cache_dir }}/containerd-{{ containerd_version }}-linux-{{ cpu_arch }}.tar.gz"
     checksum: "sha256:{{ containerd_sha256 }}"
+    timeout: 60
     owner: root
     group: root
     mode: "0644"
+  # A short network hiccup (GitHub release CDN) is retried.
+  register: containerd_download
+  retries: 3
+  delay: 5
+  until: containerd_download is succeeded
 
 - name: Create containerd release directory
   ansible.builtin.file:
@@ -68,9 +74,14 @@
     url: "{{ containerd_runc_release_url }}"
     dest: "{{ containerd_runc_binary_path }}"
     checksum: "sha256:{{ runc_sha256 }}"
+    timeout: 60
     owner: root
     group: root
     mode: "0755"
+  register: containerd_runc_download
+  retries: 3
+  delay: 5
+  until: containerd_runc_download is succeeded
 
 - name: Create containerd configuration directory
   ansible.builtin.file:
@@ -91,6 +102,77 @@
     mode: "0644"
     backup: true
   notify: Restart containerd
+
+# Registry mirrors (registry_mirrors, group_vars/all/main.yml): a hosts.toml
+# for every registry that has mirrors. containerd reads these files on every
+# pull, so a change needs no restart.
+- name: Start the list of registry mirrors
+  ansible.builtin.set_fact:
+    containerd_registry_hosts: []
+
+- name: Collect the registry mirrors
+  ansible.builtin.set_fact:
+    containerd_registry_hosts: >-
+      {{ containerd_registry_hosts
+         + [{'registry': item.key, 'server': item.value.server,
+             'mirrors': (item.value.mirrors | default('', true)).split(',') | map('trim') | reject('equalto', '') | list}] }}
+  loop: "{{ registry_mirrors | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Check the registry mirror addresses
+  ansible.builtin.assert:
+    that:
+      - item.1 is match('^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$')
+    fail_msg: >-
+      Registry mirror '{{ item.1 }}' of {{ item.0.registry }} is not a URL of the form https://host[:port] (a mirror
+      serves the registry's namespace at its root). Set REGISTRY_MIRRORS_{{ item.0.registry | upper
+      | regex_replace('[^A-Z0-9]', '_') }} to a comma-separated list of such URLs, or to an empty value for none.
+    quiet: true
+  loop: "{{ containerd_registry_hosts | subelements('mirrors') }}"
+  loop_control:
+    label: "{{ item.0.registry }}: {{ item.1 }}"
+
+- name: Create the registry host directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: >-
+    {{ [containerd_hosts_dir]
+       + containerd_registry_hosts | selectattr('mirrors') | map(attribute='registry')
+         | map('regex_replace', '^', containerd_hosts_dir ~ '/') | list }}
+
+- name: Configure the registry mirrors
+  ansible.builtin.template:
+    src: hosts.toml.j2
+    dest: "{{ containerd_hosts_dir }}/{{ item.registry }}/hosts.toml"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ containerd_registry_hosts | selectattr('mirrors') | list }}"
+  loop_control:
+    label: "{{ item.registry }}: {{ item.mirrors | join(', ') }}, then {{ item.server }}"
+
+# Only files this role wrote (they carry its marker line) are removed.
+# find matches `contains` against each line from its start.
+- name: Find registry host files written by an earlier run
+  ansible.builtin.find:
+    paths: "{{ containerd_hosts_dir }}"
+    patterns: hosts.toml
+    recurse: true
+    contains: "# kubeadm-gateway-observability registry mirrors"
+  register: containerd_hosts_files
+
+- name: Remove the host files of registries without mirrors
+  ansible.builtin.file:
+    path: "{{ containerd_hosts_dir }}/{{ item }}/hosts.toml"
+    state: absent
+  loop: >-
+    {{ containerd_hosts_files.files | map(attribute='path') | map('dirname') | map('basename')
+       | difference(containerd_registry_hosts | selectattr('mirrors') | map(attribute='registry')) }}
 
 - name: Install containerd systemd unit
   ansible.builtin.template:

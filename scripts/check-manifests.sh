@@ -4,7 +4,7 @@
 #   scripts/check-manifests.sh <python>
 #
 # Renders every release with `helmfile template` (offline: the API server
-# address is a placeholder, only the chart repositories are needed), one
+# address is a placeholder, charts from vendor/charts), one
 # directory per release, and runs:
 #
 #   kubeconform  every object against the schemas of Kubernetes v${K8S_VERSION}
@@ -32,7 +32,7 @@ set -euo pipefail
 readonly OWN_RELEASES=(namespaces network-policies pki gateway ui-routes demo-app
   etcd-metrics-proxy logging observability-extras)
 readonly PLACEHOLDER_NODE_IP=192.0.2.10
-readonly GATEWAY_CRDS_CHART="oci://docker.io/envoyproxy/gateway-crds-helm"
+readonly VENDOR_DIR="vendor/charts"
 readonly GATEWAY_CRDS_VALUES="values/envoy-gateway-crds.yaml"
 readonly CACHE_DIR=".cache"
 
@@ -64,7 +64,7 @@ run_kubeconform() {
   log "kubeconform: Kubernetes v${K8S_VERSION} and CRD schemas, strict"
   # The Envoy Gateway and Gateway API CRDs are applied by
   # scripts/apply-gateway-crds.sh, not by a release: render them the same way.
-  helm template gateway-crds "${GATEWAY_CRDS_CHART}" --version "v${ENVOY_GATEWAY_VERSION}" \
+  helm template gateway-crds "${VENDOR_DIR}/gateway-crds-helm-v${ENVOY_GATEWAY_VERSION}.tgz" \
     --values "${GATEWAY_CRDS_VALUES}" >"${work}/gateway-crds.yaml"
   find "${rendered}" -name '*.yaml' -exec cat {} + | cat - "${work}/gateway-crds.yaml" |
     "${python}" scripts/crd_schemas.py "${schemas}"

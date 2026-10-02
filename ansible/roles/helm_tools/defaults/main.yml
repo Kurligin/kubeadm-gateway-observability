@@ -1,7 +1,14 @@
 ---
 helm_tools_install_root: /opt/helm-tools
 
-helm_tools_helm_url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-{{ cpu_arch }}.tar.gz"
+# Sources of the same helm release archive, tried in order until one serves
+# it with the sha256 of versions.env: get.helm.sh (the official CDN, not
+# reachable from some networks; helm publishes no binaries on GitHub), then
+# the Huawei Cloud mirror of it.
+helm_tools_helm_archive: "helm-v{{ helm_version }}-linux-{{ cpu_arch }}.tar.gz"
+helm_tools_helm_urls:
+  - "https://get.helm.sh/{{ helm_tools_helm_archive }}"
+  - "https://mirrors.huaweicloud.com/helm/v{{ helm_version }}/{{ helm_tools_helm_archive }}"
 helm_tools_helmfile_url: >-
   https://github.com/helmfile/helmfile/releases/download/v{{ helmfile_version
   }}/helmfile_{{ helmfile_version }}_linux_{{ cpu_arch }}.tar.gz
@@ -15,11 +22,14 @@ helm_tools_helm_diff_url: >-
 helm_tools_artifacts:
   - name: helm
     version: "{{ helm_version }}"
-    url: "{{ helm_tools_helm_url }}"
+    archive: "{{ helm_tools_helm_archive }}"
+    urls: "{{ helm_tools_helm_urls }}"
     sha256: "{{ helm_sha256 }}"
     binary: "linux-{{ cpu_arch }}/helm"
   - name: helmfile
     version: "{{ helmfile_version }}"
-    url: "{{ helm_tools_helmfile_url }}"
+    archive: "{{ helm_tools_helmfile_url | basename }}"
+    urls:
+      - "{{ helm_tools_helmfile_url }}"
     sha256: "{{ helmfile_sha256 }}"
     binary: helmfile

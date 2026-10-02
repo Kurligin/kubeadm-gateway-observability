@@ -6,17 +6,22 @@
 #                                            digest and <file> is up to date
 #   scripts/images.sh pull <file>            pull the images listed in <file> (and
 #                                            the kubeadm control plane images) into
-#                                            containerd on this node
+#                                            containerd on this node, through the
+#                                            registry mirrors of containerd
 #
 # list/check render every release with `helmfile template` offline: no
-# cluster is needed (the API server address is a placeholder), only the
-# chart repositories. <python> is an interpreter with PyYAML (make passes the
+# cluster and no network are needed (the API server address is a
+# placeholder, upstream charts come from vendor/charts). <python> is an interpreter with PyYAML (make passes the
 # one from .venv). pull needs root (asks sudo) and is safe to repeat: images
 # already present are skipped. Called by `make images-list`, `make lint` and
 # `make images`.
 set -euo pipefail
 
 readonly CONTAINERD_NAMESPACE=k8s.io
+# Registry mirrors written by `make cluster` (role containerd): ctr does not
+# read the CRI configuration, so it is pointed at the same hosts.toml files
+# the kubelet's pulls go through.
+readonly HOSTS_DIR=/etc/containerd/certs.d
 readonly PULL_ATTEMPTS=3
 # Address used to render without a cluster (TEST-NET-1, never contacted).
 readonly PLACEHOLDER_NODE_IP=192.0.2.10
@@ -59,7 +64,8 @@ pull_one() {
   fi
   for attempt in $(seq "${PULL_ATTEMPTS}"); do
     log "pulling ${image} (attempt ${attempt}/${PULL_ATTEMPTS})"
-    if as_root ctr --namespace "${CONTAINERD_NAMESPACE}" images pull --platform linux/amd64 "${image}" >/dev/null; then
+    if as_root ctr --namespace "${CONTAINERD_NAMESPACE}" images pull --hosts-dir "${HOSTS_DIR}" \
+      --platform linux/amd64 "${image}" >/dev/null; then
       return
     fi
     sleep 5

@@ -122,6 +122,7 @@ help: ## Show this help
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
 	@printf '  TRACING=auto|true|false  distributed tracing; auto: on if the control plane has >= %s MiB and >= %s GiB disk\n' \
 		'$(TRACING_AUTO_MIN_MEMORY_MIB)' '$(TRACING_AUTO_MIN_DISK_GIB)'
+	@printf '  REGISTRY_MIRRORS_DOCKER_IO=<url,...>  Docker Hub mirrors of containerd, tried in order (empty: none; default: versions.env)\n'
 	@printf '  FORCE=1           confirm `make destroy` (and `make remove-worker` of a whole INVENTORY)\n'
 
 deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent
@@ -158,19 +159,16 @@ remove-worker: $(ANSIBLE_PLAYBOOK) ## Drain, delete and reset a worker node: WOR
 # if its admin password had to be generated anew).
 # --skip-diff-on-install: a first install prints no diff (it would be the
 # whole cluster, ~100k lines); upgrades still show what changes.
-# A short network hiccup (chart repository, OCI registry, image CDN) must not
-# fail the whole deployment, so both steps are retried. Chart repositories
-# are fetched first; apply then skips that step. A retry runs `sync` rather
-# than `apply`: apply skips a release whose diff is empty, and that is also
-# the case for a release left "failed" by the previous attempt.
+# Upstream charts come from vendor/charts (no chart repository is
+# contacted); their versions and checksums are checked first. A short
+# network hiccup (image registry or mirror) must not fail the whole
+# deployment, so helmfile is retried. A retry runs `sync` rather than
+# `apply`: apply skips a release whose diff is empty, and that is also the
+# case for a release left "failed" by the previous attempt.
 platform: ## Install or update cluster add-ons (helmfile only)
 	@command -v helmfile >/dev/null || { echo "helmfile not found: run 'make cluster' first" >&2; exit 1; }
+	@./scripts/vendor-charts.sh check
 	@mode="$$(./scripts/tracing-mode.sh --explain)"; echo "==> tracing: $$mode"
-	@for attempt in 1 2 3 4 5; do \
-		$(HELMFILE) repos && break; \
-		[[ $$attempt -lt 5 ]] || exit 1; \
-		echo "==> chart repositories not reachable, retrying in 15 s ($$attempt/5)" >&2; sleep 15; \
-	done
 	@args='--skip-deps --concurrency $(HELMFILE_CONCURRENCY) --suppress-secrets'; \
 	echo "$(HELMFILE) apply $$args --skip-diff-on-install $(HELMFILE_ARGS)"; \
 	$(HELMFILE) apply $$args --skip-diff-on-install $(HELMFILE_ARGS) && exit 0; \
@@ -222,7 +220,7 @@ destroy: ## Tear the cluster down with kubeadm reset (requires FORCE=1)
 	fi
 	./scripts/destroy.sh
 
-lint: ## Run shellcheck, yamllint, ansible-lint, helm lint, promtool, ruff, unit tests, image digests, kubeconform, trivy, kube-linter
+lint: ## Run shellcheck, yamllint, ansible-lint, helm lint, promtool, ruff, vendored charts, unit tests, image digests, kubeconform, trivy, kube-linter
 	@rc=0; \
 	if command -v shellcheck >/dev/null; then \
 		echo '--> shellcheck'; shellcheck $(SHELL_SCRIPTS) || rc=1; \
@@ -243,6 +241,8 @@ lint: ## Run shellcheck, yamllint, ansible-lint, helm lint, promtool, ruff, unit
 	if command -v ruff >/dev/null && command -v black >/dev/null; then \
 		echo '--> ruff, black'; ruff check $(PYTHON_SOURCES) || rc=1; black --check --quiet $(PYTHON_SOURCES) || rc=1; \
 	else echo 'skip: ruff/black not installed (make lint-deps)'; fi; \
+	echo '--> vendored charts: versions and sha256 of versions.env'; \
+	./scripts/vendor-charts.sh check || rc=1; \
 	if [[ -x $(VENV)/bin/python ]]; then \
 		echo '--> python unit tests'; $(VENV)/bin/python -m unittest discover --start-directory tests --quiet || rc=1; \
 	else echo 'skip: .venv missing (./deploy.sh --bootstrap-only)'; fi; \
@@ -256,11 +256,14 @@ lint: ## Run shellcheck, yamllint, ansible-lint, helm lint, promtool, ruff, unit
 	else echo 'skip: helmfile or .venv missing (make lint-deps)'; fi; \
 	exit $$rc
 
-# Release archives of the lint tools: <url> <sha256> <binary in the archive>.
+# Release archives of the lint tools: <url> <sha256> <binary in the archive>;
+# "<url>|<url>" lists sources tried in order (the same archive, checked
+# against the same sha256). helm: see ansible/roles/helm_tools/defaults.
 LINT_TOOLS := \
 	https://github.com/prometheus/prometheus/releases/download/v$(PROMTOOL_VERSION)/prometheus-$(PROMTOOL_VERSION).linux-amd64.tar.gz \
 		$(PROMTOOL_SHA256) prometheus-$(PROMTOOL_VERSION).linux-amd64/promtool \
-	https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz $(HELM_SHA256) linux-amd64/helm \
+	'https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz|https://mirrors.huaweicloud.com/helm/v$(HELM_VERSION)/helm-v$(HELM_VERSION)-linux-amd64.tar.gz' \
+		$(HELM_SHA256) linux-amd64/helm \
 	https://github.com/helmfile/helmfile/releases/download/v$(HELMFILE_VERSION)/helmfile_$(HELMFILE_VERSION)_linux_amd64.tar.gz \
 		$(HELMFILE_SHA256) helmfile \
 	https://github.com/yannh/kubeconform/releases/download/v$(KUBECONFORM_VERSION)/kubeconform-linux-amd64.tar.gz \

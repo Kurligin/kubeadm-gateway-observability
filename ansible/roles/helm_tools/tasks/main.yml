@@ -7,17 +7,52 @@
     group: root
     mode: "0755"
 
+# Every source of an archive is tried in order (each with a short retry).
+# Once one has served it with the pinned checksum, the next ones find the
+# file in place and download nothing (get_url compares the checksum first).
+# A source that fails shows up as an ignored error; only when none worked
+# does the role stop, naming every source and its error.
 - name: Download helm and helmfile releases
   ansible.builtin.get_url:
-    url: "{{ item.url }}"
-    dest: "{{ download_cache_dir }}/{{ item.url | basename }}"
-    checksum: "sha256:{{ item.sha256 }}"
+    url: "{{ item.1 }}"
+    dest: "{{ download_cache_dir }}/{{ item.0.archive }}"
+    checksum: "sha256:{{ item.0.sha256 }}"
+    timeout: 60
     owner: root
     group: root
     mode: "0644"
+  loop: "{{ helm_tools_artifacts | subelements('urls') }}"
+  loop_control:
+    label: "{{ item.0.name }} {{ item.0.version }} from {{ item.1 | urlsplit('hostname') }}"
+  register: helm_tools_download
+  retries: 2
+  delay: 5
+  until: helm_tools_download is succeeded
+  ignore_errors: true
+
+- name: Check the downloaded helm and helmfile archives
+  ansible.builtin.stat:
+    path: "{{ download_cache_dir }}/{{ item.archive }}"
+    checksum_algorithm: sha256
   loop: "{{ helm_tools_artifacts }}"
   loop_control:
     label: "{{ item.name }} {{ item.version }}"
+  register: helm_tools_archives
+
+- name: Stop if no source served an archive
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.checksum == item.item.sha256
+    fail_msg: >-
+      {{ item.item.name }} {{ item.item.version }} could not be downloaded with sha256 {{ item.item.sha256 }}
+      from any of its sources. {{ helm_tools_download.results | selectattr('item.0.name', 'equalto', item.item.name)
+      | map(attribute='item.1') | zip(helm_tools_download.results | selectattr('item.0.name', 'equalto', item.item.name)
+      | map(attribute='msg', default='')) | map('join', ': ') | join(' | ') }}
+    quiet: true
+  loop: "{{ helm_tools_archives.results }}"
+  loop_control:
+    label: "{{ item.item.name }} {{ item.item.version }}"
 
 - name: Create release directories
   ansible.builtin.file:
@@ -32,7 +67,7 @@
 
 - name: Unpack helm and helmfile releases
   ansible.builtin.unarchive:
-    src: "{{ download_cache_dir }}/{{ item.url | basename }}"
+    src: "{{ download_cache_dir }}/{{ item.archive }}"
     dest: "{{ helm_tools_install_root }}/{{ item.name }}/{{ item.version }}"
     remote_src: true
     owner: root
@@ -57,9 +92,14 @@
     url: "{{ helm_tools_helm_diff_url }}"
     dest: "{{ download_cache_dir }}/helm-diff-{{ helm_diff_version }}-linux-{{ cpu_arch }}.tgz"
     checksum: "sha256:{{ helm_diff_sha256 }}"
+    timeout: 60
     owner: root
     group: root
     mode: "0644"
+  register: helm_tools_helm_diff_download
+  retries: 3
+  delay: 5
+  until: helm_tools_helm_diff_download is succeeded
 
 - name: Create helm-diff release directory
   ansible.builtin.file:

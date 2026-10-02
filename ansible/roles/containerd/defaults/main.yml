@@ -16,6 +16,9 @@ containerd_binaries:
 containerd_runc_binary_path: /usr/local/sbin/runc
 
 containerd_socket: /run/containerd/containerd.sock
+# Registry host configuration (hosts.toml per registry: mirrors), read by
+# containerd on every pull and by `ctr images pull --hosts-dir` (`make images`).
+containerd_hosts_dir: /etc/containerd/certs.d
 containerd_dropin_dir: /etc/systemd/system/containerd.service.d
 # Proxy variables of containerd (only while a proxy is configured).
 containerd_proxy_env_file: /etc/kubeadm-gateway/containerd-proxy.env

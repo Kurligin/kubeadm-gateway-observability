@@ -60,3 +60,28 @@ proxy_env: >-
       'HTTPS_PROXY': proxy_https, 'https_proxy': proxy_https,
       'NO_PROXY': proxy_no_proxy, 'no_proxy': proxy_no_proxy}
      if proxy_enabled | bool else {} }}
+
+# Pull-through registry mirrors for containerd (image pulls of the kubelet,
+# kubeadm and `make images`), per registry: a comma-separated list of
+# mirror URLs (https://host[:port], the registry's namespace at the root),
+# tried in this order before the registry itself (server), which stays the
+# last resort. Taken from the environment of the deployment,
+# REGISTRY_MIRRORS_<REGISTRY> (DOCKER_IO, REGISTRY_K8S_IO, QUAY_IO,
+# GHCR_IO): unset means the default (Docker Hub: versions.env, the others:
+# none), empty means no mirror. Images are pinned by digest, so a mirror
+# cannot change what runs. A registry without mirrors gets no hosts.toml
+# (containerd's built-in behaviour); a hosts.toml written by an earlier run
+# is removed. Behind an HTTP(S) proxy the mirrors are reached through it.
+registry_mirrors:
+  docker.io:
+    server: https://registry-1.docker.io
+    mirrors: "{{ lookup('ansible.builtin.env', 'REGISTRY_MIRRORS_DOCKER_IO', default=registry_mirrors_docker_io_default) }}"
+  registry.k8s.io:
+    server: https://registry.k8s.io
+    mirrors: "{{ lookup('ansible.builtin.env', 'REGISTRY_MIRRORS_REGISTRY_K8S_IO', default='') }}"
+  quay.io:
+    server: https://quay.io
+    mirrors: "{{ lookup('ansible.builtin.env', 'REGISTRY_MIRRORS_QUAY_IO', default='') }}"
+  ghcr.io:
+    server: https://ghcr.io
+    mirrors: "{{ lookup('ansible.builtin.env', 'REGISTRY_MIRRORS_GHCR_IO', default='') }}"

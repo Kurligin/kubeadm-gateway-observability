@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# kubeadm-gateway-observability registry mirrors (this line marks the file
+# as ours: it is removed when the registry has no mirrors any more).
+# Pulls from {{ item.registry }} try the mirrors below in this order and
+# then the registry itself (server). Images are pinned by digest and
+# containerd checks every manifest and layer against it, so a mirror can
+# make a pull fail but cannot change the image.
+server = {{ item.server | tojson }}
+{% for mirror in item.mirrors %}
+
+[host.{{ mirror | tojson }}]
+  capabilities = ["pull", "resolve"]
+  # Give up on a mirror that does not answer (and go to the next one) soon.
+  dial_timeout = "10s"
+{% endfor %}

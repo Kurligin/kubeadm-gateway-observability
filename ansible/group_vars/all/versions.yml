@@ -13,6 +13,8 @@ k8s_service_subnet: "{{ lookup('ansible.builtin.ini', 'SERVICE_SUBNET', type='pr
 k8s_api_server_port: "{{ lookup('ansible.builtin.ini', 'API_SERVER_PORT', type='properties', file=versions_file) }}"
 k8s_apt_key_fingerprint: "{{ lookup('ansible.builtin.ini', 'K8S_APT_KEY_FINGERPRINT', type='properties', file=versions_file) }}"
 
+registry_mirrors_docker_io_default: >-
+  {{ lookup('ansible.builtin.ini', 'DEFAULT_REGISTRY_MIRRORS_DOCKER_IO', type='properties', file=versions_file) }}
 containerd_version: "{{ lookup('ansible.builtin.ini', 'CONTAINERD_VERSION', type='properties', file=versions_file) }}"
 containerd_sha256: "{{ lookup('ansible.builtin.ini', 'CONTAINERD_SHA256', type='properties', file=versions_file) }}"
 runc_version: "{{ lookup('ansible.builtin.ini', 'RUNC_VERSION', type='properties', file=versions_file) }}"

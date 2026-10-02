@@ -166,7 +166,7 @@ grafana:
   {{- $noProxy := env "NO_PROXY" | default (env "no_proxy") }}
   {{- if or $httpProxy $httpsProxy }}
   # Deployed behind an HTTP(S) proxy (HTTP_PROXY / HTTPS_PROXY were set):
-  # the VictoriaLogs plugin is downloaded from grafana.com through it.
+  # the VictoriaLogs plugin is downloaded from GitHub through it.
   # In-cluster addresses (datasources use <service>.<namespace>) bypass it.
   # Passed through a Secret rendered by the chart, so a password in the
   # proxy URL does not show up in the Deployment.
@@ -197,10 +197,16 @@ grafana:
     auth.anonymous:
       enabled: false
     plugins:
-      # Installed in the background on start-up: if grafana.com is not
-      # reachable, Grafana still starts (only the VictoriaLogs datasource
-      # stays unavailable; logs remain visible in vmui).
-      preinstall: {{ printf "victoriametrics-logs-datasource@%s" .Values.versions.GRAFANA_VICTORIALOGS_PLUGIN_VERSION | quote }}
+      # VictoriaLogs datasource, <id>@<version>@<url>: downloaded from its
+      # GitHub release (github.com is reachable where grafana.com may not
+      # be), the archive grafana.com serves too. It is signed by
+      # VictoriaMetrics, and Grafana verifies the signature with its
+      # built-in key, so no unsigned plugin is allowed. Installed in the
+      # background on start-up: if GitHub is not reachable, Grafana still
+      # starts (only the VictoriaLogs datasource stays unavailable; logs
+      # remain visible in vmui).
+      {{- $plugin := .Values.versions.GRAFANA_VICTORIALOGS_PLUGIN_VERSION }}
+      preinstall: {{ printf "victoriametrics-logs-datasource@%s@https://github.com/VictoriaMetrics/victorialogs-datasource/releases/download/v%s/victoriametrics-logs-datasource-v%s.zip" $plugin $plugin $plugin | quote }}
       preinstall_async: true
   # Grafana 13 idles at ~450 MiB; with a 512 MiB limit (GOMEMLIMIT is set
   # to 90 % of it by the chart) opening a dashboard pushed it into GC

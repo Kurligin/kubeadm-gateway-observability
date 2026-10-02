@@ -95,18 +95,10 @@ helmDefaults:
   historyMax: 5
   createNamespace: true
 
-repositories:
-  - name: cilium
-    url: https://helm.cilium.io
-  - name: jetstack
-    url: https://charts.jetstack.io
-  - name: prometheus-community
-    url: https://prometheus-community.github.io/helm-charts
-  - name: vm
-    url: https://victoriametrics.github.io/helm-charts
-  - name: metrics-server
-    url: https://kubernetes-sigs.github.io/metrics-server/
-
+# Upstream charts are installed from the archives in vendor/charts (the very
+# files their repositories serve, sha256 pinned in versions.env and checked
+# by `make lint` / `make platform`): no chart repository or OCI registry is
+# contacted, so deploying and offline rendering do not depend on them.
 releases:
   # Prometheus Operator CRDs (ServiceMonitor, PodMonitor, PrometheusRule, ...)
   # first: almost every chart below ships a ServiceMonitor, Cilium included.
@@ -114,13 +106,11 @@ releases:
   # regular release (CRDs in templates/), they are upgraded with the chart.
   - name: prometheus-operator-crds
     namespace: kube-system
-    chart: prometheus-community/prometheus-operator-crds
-    version: {{ .Values.versions.PROMETHEUS_OPERATOR_CRDS_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/prometheus-operator-crds-%s.tgz" .Values.versions.PROMETHEUS_OPERATOR_CRDS_VERSION }}
 
   - name: cilium
     namespace: kube-system
-    chart: cilium/cilium
-    version: {{ .Values.versions.CILIUM_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/cilium-%s.tgz" .Values.versions.CILIUM_VERSION }}
     # Ships ServiceMonitors: the first diff runs before any CRD exists.
     disableValidationOnInstall: true
     needs:
@@ -181,8 +171,7 @@ releases:
   # waits until the webhook serves requests, so issuers can be created next.
   - name: cert-manager
     namespace: cert-manager
-    chart: jetstack/cert-manager
-    version: {{ printf "v%s" .Values.versions.CERT_MANAGER_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/cert-manager-v%s.tgz" .Values.versions.CERT_MANAGER_VERSION }}
     disableValidationOnInstall: true
     needs:
       - kube-system/namespaces
@@ -207,8 +196,7 @@ releases:
   # this release is installed or changed, e.g. on an ENVOY_GATEWAY_VERSION bump.
   - name: envoy-gateway
     namespace: envoy-gateway-system
-    chart: oci://docker.io/envoyproxy/gateway-helm
-    version: {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/gateway-helm-v%s.tgz" .Values.versions.ENVOY_GATEWAY_VERSION }}
     needs:
       - kube-system/namespaces
     values:
@@ -218,7 +206,7 @@ releases:
         showlogs: true
         command: ./scripts/apply-gateway-crds.sh
         args:
-          - {{ printf "v%s" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
+          - {{ printf "./vendor/charts/gateway-crds-helm-v%s.tgz" .Values.versions.ENVOY_GATEWAY_VERSION | quote }}
           - values/envoy-gateway-crds.yaml
 
   # Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics.
@@ -231,8 +219,7 @@ releases:
   # release below that ships a ServiceMonitor or rules).
   - name: kube-prometheus-stack
     namespace: {{ .Values.monitoring.namespace }}
-    chart: prometheus-community/kube-prometheus-stack
-    version: {{ .Values.versions.KUBE_PROMETHEUS_STACK_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/kube-prometheus-stack-%s.tgz" .Values.versions.KUBE_PROMETHEUS_STACK_VERSION }}
     disableValidationOnInstall: true
     needs:
       - kube-system/namespaces
@@ -278,8 +265,7 @@ releases:
   # Log storage with LogsQL API and web UI.
   - name: victoria-logs
     namespace: {{ .Values.logging.namespace }}
-    chart: vm/victoria-logs-single
-    version: {{ .Values.versions.VICTORIA_LOGS_CHART_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/victoria-logs-single-%s.tgz" .Values.versions.VICTORIA_LOGS_CHART_VERSION }}
     disableValidationOnInstall: true
     needs:
       - kube-system/namespaces
@@ -299,8 +285,7 @@ releases:
   # namespaces release removes the namespace.
   - name: victoria-traces
     namespace: {{ .Values.tracing.namespace }}
-    chart: vm/victoria-traces-single
-    version: {{ .Values.versions.VICTORIA_TRACES_CHART_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/victoria-traces-single-%s.tgz" .Values.versions.VICTORIA_TRACES_CHART_VERSION }}
     installed: {{ .Values.tracing.enabled }}
     disableValidationOnInstall: true
     needs:
@@ -420,8 +405,7 @@ releases:
   # demo CA (pki).
   - name: metrics-server
     namespace: kube-system
-    chart: metrics-server/metrics-server
-    version: {{ .Values.versions.METRICS_SERVER_CHART_VERSION | quote }}
+    chart: {{ printf "./vendor/charts/metrics-server-%s.tgz" .Values.versions.METRICS_SERVER_CHART_VERSION }}
     disableValidationOnInstall: true
     needs:
       - cert-manager/pki

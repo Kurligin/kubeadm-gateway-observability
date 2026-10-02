@@ -3,6 +3,9 @@
 #
 #   scripts/install-tool.sh <url of a .tar.gz> <sha256 of it> <path in the archive> <bin dir>
 #
+# <url> may list several sources of the same archive, "<url>|<url>|...":
+# they are tried in order until one serves an archive with this checksum,
+# so a source that is blocked or down only costs a retry.
 # Installs <path in the archive> as <bin dir>/<its base name>. Does nothing if
 # that binary was already installed from an archive with this checksum (a
 # stamp file next to it records the checksum). Called by `make lint-deps`
@@ -11,14 +14,16 @@
 set -euo pipefail
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
 die() {
   printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2
   exit 1
 }
 
 main() {
-  [[ $# -eq 4 ]] || die "usage: $0 <url> <sha256> <path in the archive> <bin dir>"
-  local url=$1 sha256=$2 member=$3 bin_dir=$4
+  [[ $# -eq 4 ]] || die "usage: $0 <url>[|<url>...] <sha256> <path in the archive> <bin dir>"
+  local urls=$1 sha256=$2 member=$3 bin_dir=$4
+  local url=${urls%%|*}
   [[ "$(uname -s)/$(uname -m)" == "Linux/x86_64" ]] || die "only linux/amd64 is supported"
   local name=${member##*/}
   local stamp="${bin_dir}/.${name}.sha256"
@@ -33,10 +38,23 @@ main() {
   # shellcheck disable=SC2064 # expand the path now
   trap "rm -rf '${tmp}'" EXIT
 
-  log "Downloading ${url}"
-  curl -fsSL --retry 3 -o "${tmp}/archive.tar.gz" "${url}"
-  printf '%s  %s\n' "${sha256}" "${tmp}/archive.tar.gz" | sha256sum --check --quiet ||
-    die "checksum mismatch for ${url}"
+  local -a sources
+  local ok=false
+  IFS='|' read -r -a sources <<<"${urls}"
+  for url in "${sources[@]}"; do
+    log "Downloading ${url}"
+    if ! curl -fsSL --retry 3 --connect-timeout 20 -o "${tmp}/archive.tar.gz" "${url}"; then
+      warn "download failed: ${url}"
+      continue
+    fi
+    if ! printf '%s  %s\n' "${sha256}" "${tmp}/archive.tar.gz" | sha256sum --check --quiet; then
+      warn "checksum mismatch, archive ignored: ${url}"
+      continue
+    fi
+    ok=true
+    break
+  done
+  [[ ${ok} == true ]] || die "no source served ${name} with sha256 ${sha256}: ${urls//|/, }"
   tar -xzf "${tmp}/archive.tar.gz" -C "${tmp}" "${member}"
   mkdir -p "${bin_dir}"
   install -m 0755 "${tmp}/${member}" "${bin_dir}/${name}"
