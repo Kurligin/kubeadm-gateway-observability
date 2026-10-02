@@ -20,6 +20,7 @@ from typing import Any, TextIO
 ALERTS_PATH = "/alerts"
 HEALTH_PATH = "/healthz"
 MAX_BODY_BYTES = 1 << 20
+SOCKET_TIMEOUT_SECONDS = 15
 
 
 def _text_map(value: Any) -> dict[str, str]:
@@ -74,6 +75,8 @@ def make_server(host: str, port: int, output: TextIO) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         server_version = "alert-receiver"
         sys_version = ""
+        # Seconds a client may stay silent before the connection is dropped.
+        timeout = SOCKET_TIMEOUT_SECONDS
 
         def _reply(self, status: HTTPStatus) -> None:
             body = f"{status.phrase}\n".encode()
@@ -90,7 +93,10 @@ def make_server(host: str, port: int, output: TextIO) -> ThreadingHTTPServer:
             if self.path != ALERTS_PATH:
                 self._reply(HTTPStatus.NOT_FOUND)
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
             if length <= 0 or length > MAX_BODY_BYTES:
                 self._reply(HTTPStatus.BAD_REQUEST)
                 return

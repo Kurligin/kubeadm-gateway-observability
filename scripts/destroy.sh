@@ -3,7 +3,8 @@
 # it again from scratch. Installed packages, binaries and the download cache
 # are kept (re-deploy is faster and still pinned by versions.env). Only state
 # created by kubeadm, kubelet, Cilium and this repository is removed: volumes
-# (local-path), Fluentd positions and buffer, pod logs, the metrics firewall.
+# (local-path), Fluentd positions and buffer, pod logs, the metrics firewall,
+# the kubelet certificate approver.
 # Called by `make destroy FORCE=1`.
 set -euo pipefail
 
@@ -22,6 +23,10 @@ readonly FIREWALL_SERVICE="kubeadm-gateway-metrics-firewall"
 readonly FIREWALL_UNIT="/etc/systemd/system/${FIREWALL_SERVICE}.service"
 readonly FIREWALL_RULES="/etc/kubeadm-gateway/metrics-firewall.nft"
 readonly FIREWALL_TABLE="kubeadm_gateway_metrics"
+# Approver of kubelet serving certificates (Ansible role kubeadm_init).
+readonly APPROVER_UNIT="kubeadm-gateway-kubelet-cert-approver"
+readonly APPROVER_FILES=("/etc/systemd/system/${APPROVER_UNIT}.service" "/etc/systemd/system/${APPROVER_UNIT}.timer"
+  "/usr/local/sbin/kubeadm-gateway-approve-kubelet-certs" "/etc/kubeadm-gateway/kubelet-serving-nodes.json")
 readonly CILIUM_CNI_CONF="/etc/cni/net.d/05-cilium.conflist"
 readonly CILIUM_SYSCTL_CONF="/etc/sysctl.d/99-zzz-override_cilium.conf"
 readonly BPF_FS="/sys/fs/bpf"
@@ -118,6 +123,15 @@ cleanup_firewall() {
   as_root rmdir --ignore-fail-on-non-empty "$(dirname "${FIREWALL_RULES}")" 2>/dev/null || true
 }
 
+cleanup_approver() {
+  if as_root test -f "/etc/systemd/system/${APPROVER_UNIT}.timer"; then
+    log "Removing the kubelet certificate approver (${APPROVER_UNIT})"
+    as_root systemctl disable --now "${APPROVER_UNIT}.timer" >/dev/null 2>&1 || true
+  fi
+  as_root rm -f "${APPROVER_FILES[@]}"
+  as_root systemctl daemon-reload
+}
+
 cleanup_node_state() {
   log "Removing Fluentd state (${FLUENTD_STATE_DIR}) and logs of the removed pods"
   as_root rm -rf --one-file-system "${FLUENTD_STATE_DIR}"
@@ -151,6 +165,7 @@ main() {
   as_root rm -rf --one-file-system "${LOCAL_PATH_DIR}"
 
   cleanup_node_state
+  cleanup_approver
   cleanup_firewall
 
   log "Removing kubeconfig files"

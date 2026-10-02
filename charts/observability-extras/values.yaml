@@ -83,6 +83,10 @@ slo:
       objective: 0.99
       thresholdMs: 250
       description: 99 % of the requests to app.demo.local are answered within 250 ms
+  # Burn rate alerts need at least this many requests per second over the
+  # long window (0.01/s = 36 per hour): a handful of failed requests in an
+  # otherwise idle demo cluster is not an outage.
+  minRequestRate: 0.01
   # Burn rate alerts: an alert fires when both the long and the short window
   # burn the error budget at least <factor> times faster than allowed.
   # factor 14.4 over 1 h = 2 % of a 30-day budget in an hour, and so on.

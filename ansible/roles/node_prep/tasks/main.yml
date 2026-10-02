@@ -21,7 +21,8 @@
     dest: "{{ node_prep_apt_proxy_file }}"
     owner: root
     group: root
-    mode: "0644"
+    # A password in the proxy URL: root only (apt runs as root here).
+    mode: "{{ '0600' if proxy_has_credentials | bool else '0644' }}"
   when: proxy_enabled | bool
 
 - name: Remove the apt proxy configuration when no proxy is set

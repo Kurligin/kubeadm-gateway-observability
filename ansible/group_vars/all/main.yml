@@ -41,6 +41,18 @@ proxy_no_proxy: >-
       + [k8s_pod_subnet, k8s_service_subnet, '.svc', '.cluster.local', proxy_demo_domain, '.' ~ proxy_demo_domain])
      | map('trim') | reject('equalto', '') | unique | join(',') }}
 proxy_demo_domain: demo.local
+# The same variables emptied, for commands that must not see the proxy
+# (task-level environment is merged over the play's).
+proxy_env_unset:
+  HTTP_PROXY: ""
+  http_proxy: ""
+  HTTPS_PROXY: ""
+  https_proxy: ""
+  NO_PROXY: ""
+  no_proxy: ""
+# User name and password in the proxy URL: then the files holding it are
+# readable by root only.
+proxy_has_credentials: "{{ (proxy_http ~ ' ' ~ proxy_https) is search('://[^/ ]*@') }}"
 proxy_env: >-
   {{ {'HTTP_PROXY': proxy_http, 'http_proxy': proxy_http,
       'HTTPS_PROXY': proxy_https, 'https_proxy': proxy_https,

@@ -274,7 +274,8 @@ check_gateway() {
 }
 
 # Every HTTPRoute of the Gateway is Accepted with all references resolved
-# (filters such as RequestMirror and the timeouts included).
+# (filters such as RequestMirror and the timeouts included), for each of
+# its parents (listeners) separately.
 check_routes() {
   have_kubectl || {
     reason="no kubectl access to this cluster"
@@ -287,8 +288,8 @@ check_routes() {
   }
   total="$(jq '.items | length' <<<"${routes}")"
   bad="$(jq -r '.items[] | .metadata.name as $n
-    | ([.status.parents[]?.conditions[]? | select(.type == "Accepted" or .type == "ResolvedRefs") | select(.status == "True")] | length) as $ok
-    | select($ok < 2) | $n' <<<"${routes}" | xargs)"
+    | [.status.parents[]? | ([.conditions[]? | select((.type == "Accepted" or .type == "ResolvedRefs") and .status == "True")] | length)] as $ok
+    | select(($ok | length) == 0 or ($ok | any(. < 2))) | $n' <<<"${routes}" | xargs)"
   if [[ ${total} -eq 0 ]]; then
     reason="no HTTPRoutes in ${GATEWAY_NAMESPACE}"
     return 1

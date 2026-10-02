@@ -53,12 +53,15 @@ vmui через тот же Gateway. Повторный запуск ничег�
   | ВМ | занято ОЗУ (`free`) | доступно | рабочий набор подов (`kubectl top`) | крупнейшие |
   |---|---|---|---|---|
   | 4 vCPU / 8 ГБ | 3,5 ГБ | 4,3–4,4 ГБ | 2,8–3,3 ГБ | kube-apiserver 0,8, Grafana 0,42–0,58, Prometheus 0,32–0,43, Cilium 0,23–0,42 ГБ |
-  | 2 vCPU / 4 ГБ | 3,4–3,5 ГБ | 0,42–0,48 ГБ | 2,8 ГБ | kube-apiserver 0,89, Grafana 0,39, Prometheus 0,36, Cilium 0,26 ГБ |
+  | 2 vCPU / 4 ГБ | 3,4–3,5 ГБ | 0,37–0,48 ГБ | 2,8–2,9 ГБ | kube-apiserver 0,82–0,89, Grafana 0,39–0,43, Prometheus 0,36–0,43, Cilium 0,26 ГБ |
 
   Вторая реплика Envoy, metrics-server и получатель алертов вместе
   добавляют ~0,1 ГБ (Envoy ~40 МиБ на реплику, metrics-server 20–30 МиБ,
   получатель ~13 МиБ). На 2 vCPU / 4 ГБ `make verify` проходит, но запас
-  стал меньше (было 0,65 ГБ доступно, стало 0,42–0,48 ГБ); под нагрузкой
+  стал меньше (было 0,65 ГБ доступно, стало 0,37–0,48 ГБ — Prometheus
+растёт с числом серий и правил; если нужно
+больше, на такой ВМ можно оставить одну реплику Envoy —
+`envoyProxy.replicas: 1` в `charts/gateway/values.yaml`, ~40 МиБ); под нагрузкой
   (первый деплой) control plane может перезапуститься — развёртывание это
   переживает.
 - Диск. Сразу после деплоя занято ~9,7 ГБ (Ubuntu 2,3 ГБ, образы
@@ -139,17 +142,24 @@ export HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:312
 |---|---|
 | `deploy.sh`: apt (`python3-venv`, `make`), pip | переменные окружения (sudo их сохраняет) |
 | Ansible: `get_url` (containerd, runc, helm, helmfile, ключ pkgs.k8s.io), apt | окружение плея; apt — файл `/etc/apt/apt.conf.d/95kubeadm-gateway-proxy` |
-| containerd (все образы, в т. ч. для kubeadm) | systemd drop-in `/etc/systemd/system/containerd.service.d/http-proxy.conf` |
+| containerd (все образы, в т. ч. для kubeadm) | systemd drop-in `/etc/systemd/system/containerd.service.d/http-proxy.conf` → `EnvironmentFile=/etc/kubeadm-gateway/containerd-proxy.env` (0600) |
 | helm/helmfile (чарты), `make images` | окружение `make` |
-| Grafana (плагин VictoriaLogs с grafana.com) | переменные `HTTP(S)_PROXY` в поде Grafana (только при заданном прокси) |
+| Grafana (плагин VictoriaLogs с grafana.com) | переменные `HTTP(S)_PROXY` из Secret, который рендерит чарт Grafana (`envRenderSecret`; только при заданном прокси) |
 
 kubelet прокси не нужен: образы тянет containerd, а сам kubelet ходит только
 в API-сервер на этом узле. `NO_PROXY` дополняется автоматически
 (`scripts/no-proxy.sh`): `localhost`, `127.0.0.1`, все IPv4-адреса узла,
 адрес API-сервера, сеть подов `10.244.0.0/16`, сервисов `10.96.0.0/12`,
-`.svc`, `.cluster.local`, `demo.local`. `kubeadm init` сам переносит эти
-переменные в манифесты control plane — поэтому кластер, созданный через
-прокси, сохраняет их там и после запусков без прокси. Запросы `make verify`
+`.svc`, `.cluster.local`, `demo.local`. `kubeadm init` запускается без
+прокси: иначе kubeadm навсегда вписал бы его в манифесты control plane
+(образы для него тянет containerd со своей настройкой).
+
+Прокси с логином и паролем (`http://user:pass@proxy:3128`; спецсимволы в
+пароле — в URL-кодировке, `%` → `%25`) поддерживается: адрес с паролем
+лежит только в файлах, доступных root (`0600`: apt-конфиг — если в URL есть
+пароль, файл окружения containerd), в Secret для Grafana и в Secret
+релиза Helm; `deploy.sh` печатает адрес прокси без пароля, `helmfile`
+не показывает diff Secret'ов. Запросы `make verify`
 к Gateway всегда идут напрямую (`curl --noproxy '*'`). Если вызываете
 `kubectl` руками в сессии с `HTTPS_PROXY`, добавьте в `NO_PROXY` IP узла —
 иначе запрос к API-серверу уйдёт в прокси.
@@ -176,7 +186,7 @@ docker.angie.software), grafana.com. Повторный запуск без пр
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
 | `make images` | после `make cluster`: скачать в containerd все образы из `images.txt` (по digest) и образы control plane kubeadm; уже скачанные пропускаются |
 | `make images-list` | пересобрать `images.txt` из отрендеренных манифестов (после смены версий в `versions.env`) |
-| `make lint-deps && make lint` | shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален |
+| `make lint-deps && make lint` | без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален |
 
 ## Проверка
 
@@ -217,7 +227,12 @@ make verify        # на узле: адрес, CA и пароль берутс�
 Сразу после **обновления** уже работающего кластера (не первой установки)
 Prometheus Operator может пересоздать под Prometheus дважды; на 2 vCPU
 второй перезапуск ждёт завершения первого до ~10 мин, и проверки шага 7
-до этого не проходят — повторите `make verify` через несколько минут.
+до этого не проходят — повторите `make verify` через несколько минут. Там
+же, на 2 vCPU / 4 ГБ, при таком обновлении (перезапускается почти всё)
+бывают однократные перезапуски контроллеров (kube-controller-manager,
+kube-scheduler, контроллер Envoy Gateway по liveness) из-за медленного
+etcd; они поднимаются сами, `make verify` после этого зелёный. На 4/8 этого
+не видели.
 
 **С другой машины** (без kubectl) — те же проверки, кроме уровня кластера
 (шаги 1–2 будут пропущены). Нужны `curl`, `jq`, CA и пароль basic auth с
@@ -322,7 +337,10 @@ kubectl -n gateway get httproute app -o jsonpath='{.spec.rules[*].timeouts}'; ec
 
 Зеркальные копии Angie считает в отдельной зоне `shadow`, а Envoy — в
 отдельном кластере `…/rule/2-mirror-2`, поэтому ни раскладка canary, ни
-SLO и алерты их не учитывают.
+SLO и алерты их не учитывают. Зеркалируется 100 % запросов правила `/`
+любым методом (в том числе POST): для демо-приложения без состояния это
+безопасно, для настоящего сервиса с записью зеркало надо ограничивать
+(`fraction`/`percent` в `RequestMirror`, отдельное правило для GET).
 
 Сквозной идентификатор запроса: Envoy сохраняет присланный `X-Request-ID`
 (или генерирует свой) и передаёт его приложению; он есть и в access-логе
@@ -481,11 +499,19 @@ VictoriaLogs. Источник данных VictoriaLogs — плагин
 | `AppLatencyBudgetBurnFast` / `…Slow` | SLO 99 % запросов быстрее 250 мс (время ответа приложения по гистограмме Envoy), те же окна и пороги |
 
 SLO считаются по записанным правилам `slo:sli_error:ratio_rate<окно>`
-(5m … 3d) только для маршрута приложения (зеркало и UI не входят). Логику
-алертов проверяют unit-тесты `tests/prometheus/slo.test.yaml`
-(`promtool test rules` в `make lint`): 5 % ошибок → fast и slow, 0,5 % →
-только slow, ошибки зеркала и других маршрутов → ничего, нет трафика →
-ничего, 20 % медленных запросов → fast по задержке.
+(5m … 3d) только для маршрута приложения (зеркало и UI не входят); без
+запросов в окне значения нет вовсе (не NaN), и панели пишут «no requests».
+Алерты срабатывают только при трафике не меньше 0,01 запроса/с в длинном
+окне (36 в час, `slo.minRequestRate`): пара ошибок в простаивающем
+демо-кластере — не авария. Запрос, оборванный таймаутом (504), считается
+ошибкой доступности, а в SLI задержки не попадает. Логику алертов
+проверяют unit-тесты `tests/prometheus/slo.test.yaml` (`promtool test
+rules` в `make lint`, 11 сценариев): 5 % ошибок → fast и slow; 0,5 % →
+только slow; 0,7 % → fast через пару 6 ч / 30 мин; ошибки час назад, а
+короткие окна уже чистые → fast нет; ошибки зеркала и других маршрутов →
+ничего; трафик ниже порога → ничего; нет трафика → ни значения, ни алерта
+(и для задержки); 20 % медленных запросов → fast по задержке; граница
+гистограммы `250` и `250.0` дают одно и то же.
 
 `FluentdBufferErrors` смотрит на рост счётчиков ретраев за 10 минут, поэтому
 после простоя VictoriaLogs или перезагрузки узла он может гореть ещё до
@@ -801,16 +827,26 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   включён `serverTLSBootstrap: true`: kubelet запрашивает сертификат у CA
   кластера (CSR, signer `kubernetes.io/kubelet-serving`). Такие запросы
   Kubernetes сам не одобряет — запрос доказывает только, какой узел его
-  прислал, но не то, что имена в нём принадлежат узлу. Одобряет роль
-  `kubeadm_init` (`tasks/kubelet_serving.yml`), предварительно проверив, что
-  в сертификате только имя этого узла и его IP; при каждом `make deploy` —
-  ещё раз (сертификат живёт год, kubelet заранее просит новый). Для уже
+  прислал, но не то, что имена в нём принадлежат узлу. Одобряет скрипт
+  `ansible/roles/kubeadm_init/files/approve-kubelet-serving-csr.sh`: запрос
+  от `system:node:<имя>` проходит, только если узел с таким именем есть в
+  inventory Ansible, subject — `CN=system:node:<имя>, O=system:nodes`, а в
+  сертификате только имя этого узла и его IP из фактов Ansible (IPv6
+  сравниваются в нормализованном виде); остальное остаётся pending с
+  сообщением. Список узлов (`/etc/kubeadm-gateway/kubelet-serving-nodes.json`,
+  0600) пишется на каждом деплое из всех хостов inventory, так что воркеры,
+  добавленные в inventory, одобряются тем же путём (сам join воркеров пока
+  не автоматизирован). Скрипт запускают каждый `make deploy` и раз в час
+  systemd-таймер `kubeadm-gateway-kubelet-cert-approver.timer` на control
+  plane — так продление сертификата (kubelet просит новый на 70–90 % срока
+  в год) одобряется и без деплоя; `make destroy` таймер снимает. Для уже
   созданного кластера та же задача включает настройку на узле и в ConfigMap
   `kube-system/kubelet-config` (её берут `kubeadm upgrade` и новые узлы) и
-  перезапускает kubelet — поды при этом не останавливаются. Отдельный
-  контроллер-одобритель (kubelet-csr-approver) не ставили: это ещё один под
-  на узле, где памяти впритык, а узел один и одобрение при деплое покрывает
-  и его, и будущие `add-worker`.
+  перезапускает kubelet — поды при этом не останавливаются. Если прогон
+  прервали между правкой конфига и перезапуском, следующий прогон увидит
+  «настройка есть, сертификата и запроса нет» и перезапустит kubelet сам.
+  Отдельный контроллер-одобритель (kubelet-csr-approver) не ставили: это
+  ещё один под на узле, где памяти впритык.
 - **Образы по digest.** Каждый образ задан как `tag@sha256:…` (digest
   мультиархитектурного индекса): в `versions.env` — `<ИМЯ>_DIGEST` для
   образов, чей тег уже есть там как версия, и `<ИМЯ>_IMAGE` (тег и digest)

@@ -47,7 +47,8 @@ normalize_proxy_env() {
   [[ -n ${http}${https} ]] || return 0
   export HTTP_PROXY=${http} http_proxy=${http} HTTPS_PROXY=${https} https_proxy=${https}
   export NO_PROXY=${no} no_proxy=${no}
-  log "Using the HTTP(S) proxy ${https:-${http}}"
+  # Never print a password that may be part of the proxy URL.
+  log "Using the HTTP(S) proxy $(sed -E 's#//[^/@]*@#//***@#' <<<"${https:-${http}}")"
 }
 
 check_os() {

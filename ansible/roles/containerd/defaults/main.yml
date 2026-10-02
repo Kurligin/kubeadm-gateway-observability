@@ -17,3 +17,5 @@ containerd_runc_binary_path: /usr/local/sbin/runc
 
 containerd_socket: /run/containerd/containerd.sock
 containerd_dropin_dir: /etc/systemd/system/containerd.service.d
+# Proxy variables of containerd (only while a proxy is configured).
+containerd_proxy_env_file: /etc/kubeadm-gateway/containerd-proxy.env

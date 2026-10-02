@@ -127,6 +127,9 @@ alertmanager:
         webhook_configs:
           - url: {{ printf "http://alert-receiver.%s.svc:8080/alerts" .Values.monitoring.namespace | quote }}
             send_resolved: true
+            # One notification stays well below the 1 MiB the receiver
+            # accepts; the alerts beyond 200 of a group are left out of it.
+            max_alerts: 200
   alertmanagerSpec:
     image:
       tag: {{ $tag.ALERTMANAGER_IMAGE | quote }}
@@ -150,16 +153,19 @@ grafana:
   # No Helm test pod (it would need one more image).
   testFramework:
     enabled: false
-  {{- $httpProxy := env "HTTP_PROXY" }}
-  {{- $httpsProxy := env "HTTPS_PROXY" }}
+  {{- $httpProxy := env "HTTP_PROXY" | default (env "http_proxy") }}
+  {{- $httpsProxy := env "HTTPS_PROXY" | default (env "https_proxy") }}
+  {{- $noProxy := env "NO_PROXY" | default (env "no_proxy") }}
   {{- if or $httpProxy $httpsProxy }}
   # Deployed behind an HTTP(S) proxy (HTTP_PROXY / HTTPS_PROXY were set):
   # the VictoriaLogs plugin is downloaded from grafana.com through it.
   # In-cluster addresses (datasources use <service>.<namespace>) bypass it.
-  env:
+  # Passed through a Secret rendered by the chart, so a password in the
+  # proxy URL does not show up in the Deployment.
+  envRenderSecret:
     HTTP_PROXY: {{ $httpProxy | quote }}
     HTTPS_PROXY: {{ $httpsProxy | quote }}
-    NO_PROXY: {{ printf "%s,%s,%s" (env "NO_PROXY") .Values.monitoring.namespace .Values.logging.namespace | trimPrefix "," | quote }}
+    NO_PROXY: {{ printf "%s,%s,%s" $noProxy .Values.monitoring.namespace .Values.logging.namespace | trimPrefix "," | quote }}
   {{- end }}
   # Admin credentials come from a Secret created on the first deploy by
   # scripts/ensure-grafana-admin.sh (random password, never in git).

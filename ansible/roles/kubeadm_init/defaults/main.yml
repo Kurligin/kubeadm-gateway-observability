@@ -24,3 +24,8 @@ kubeadm_init_kubelet_serving_cert: /var/lib/kubelet/pki/kubelet-server-current.p
 # How long to wait for the kubelet's serving certificate request:
 # retries x 5 seconds.
 kubeadm_init_serving_cert_retries: 36
+# Approver of kubelet serving certificate requests (files/), its node list
+# and its hourly systemd timer.
+kubeadm_init_approver_script: /usr/local/sbin/kubeadm-gateway-approve-kubelet-certs
+kubeadm_init_approver_nodes_file: /etc/kubeadm-gateway/kubelet-serving-nodes.json
+kubeadm_init_approver_unit: kubeadm-gateway-kubelet-cert-approver

@@ -24,23 +24,44 @@ spec:
             slo: {{ $o.name }}
         {{- range $w := $slo.windows }}
         {{- if eq $o.kind "availability" }}
-        # Share of 5xx answers (0 when there were requests, but no 5xx).
-        - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
+        # Requests per second (the denominator of the ratio below).
+        - record: {{ printf "slo:sli_requests:rate%s" $w }}
           expr: |
-            (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[{{ $w }}])) or vector(0))
-            /
             sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}]))
           labels:
             slo: {{ $o.name }}
-        {{- else if eq $o.kind "latency" }}
-        # Share of requests slower than {{ $o.thresholdMs }} ms.
+        # Share of 5xx answers (0 when there were requests, but no 5xx; no
+        # value at all without requests, instead of NaN).
         - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
           expr: |
-            1 - (
-              sum(rate(envoy_cluster_upstream_rq_time_bucket{ {{- $app }}, le="{{ printf "%.1f" (float64 $o.thresholdMs) }}"}[{{ $w }}]))
+            (
+              (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[{{ $w }}])) or vector(0))
               /
-              sum(rate(envoy_cluster_upstream_rq_time_count{ {{- $app }}}[{{ $w }}]))
+              sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}]))
             )
+            and on () (sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}])) > 0)
+          labels:
+            slo: {{ $o.name }}
+        {{- else if eq $o.kind "latency" }}
+        - record: {{ printf "slo:sli_requests:rate%s" $w }}
+          expr: |
+            sum(rate(envoy_cluster_upstream_rq_time_count{ {{- $app }}}[{{ $w }}]))
+          labels:
+            slo: {{ $o.name }}
+        # Share of requests slower than {{ $o.thresholdMs }} ms. The bucket
+        # boundary is matched both as "{{ $o.thresholdMs }}" and "{{ $o.thresholdMs }}.0"
+        # (Prometheus 3 normalizes classic histogram boundaries to floats).
+        # Requests that time out get a 504 and count against availability.
+        - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
+          expr: |
+            (
+              1 - (
+                sum(rate(envoy_cluster_upstream_rq_time_bucket{ {{- $app }}, le=~"{{ $o.thresholdMs }}(\\.0)?"}[{{ $w }}]))
+                /
+                sum(rate(envoy_cluster_upstream_rq_time_count{ {{- $app }}}[{{ $w }}]))
+              )
+            )
+            and on () (sum(rate(envoy_cluster_upstream_rq_time_count{ {{- $app }}}[{{ $w }}])) > 0)
           labels:
             slo: {{ $o.name }}
         {{- else }}
@@ -61,6 +82,8 @@ spec:
               slo:sli_error:ratio_rate{{ $w.long }}{slo="{{ $o.name }}"} > ({{ $w.factor }} * {{ include "observability-extras.sloBudget" $o }})
               and
               slo:sli_error:ratio_rate{{ $w.short }}{slo="{{ $o.name }}"} > ({{ $w.factor }} * {{ include "observability-extras.sloBudget" $o }})
+              and
+              slo:sli_requests:rate{{ $w.long }}{slo="{{ $o.name }}"} > {{ $slo.minRequestRate }}
             )
             {{- end }}
           labels:

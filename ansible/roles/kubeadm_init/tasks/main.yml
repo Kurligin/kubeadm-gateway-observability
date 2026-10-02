@@ -18,9 +18,13 @@
         group: root
         mode: "0600"
 
+    # Without the proxy of the deployment: kubeadm would copy it into the
+    # control plane manifests for good. Images are pulled by containerd,
+    # which has its own proxy setting.
     - name: Run kubeadm init
       ansible.builtin.command:
         cmd: "kubeadm init --config {{ kubeadm_init_config_path }}"
+      environment: "{{ proxy_env_unset }}"
       changed_when: true
 
   rescue:

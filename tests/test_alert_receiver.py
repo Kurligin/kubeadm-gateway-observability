@@ -5,6 +5,7 @@ Run by `make lint` (python -m unittest discover tests).
 
 import io
 import json
+import socket
 import sys
 import threading
 import unittest
@@ -112,6 +113,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.request("POST", "/alerts", b"{not json"), 400)
         self.assertEqual(self.request("POST", "/other", b"{}"), 404)
         self.assertEqual(self.request("GET", "/alerts"), 404)
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_bad_content_length(self) -> None:
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as conn:
+            conn.sendall(b"POST /alerts HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n")
+            reply = conn.recv(1024)
+        self.assertTrue(reply.startswith(b"HTTP/1.0 400"), reply)
         self.assertEqual(self.output.getvalue(), "")
 
     def test_healthz(self) -> None:

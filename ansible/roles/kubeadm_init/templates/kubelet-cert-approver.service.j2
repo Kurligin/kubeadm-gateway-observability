@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Approves pending kubelet serving certificate requests of the inventory
+# nodes (renewals between deployments). Started by the timer of the same name.
+[Unit]
+Description=Approve kubelet serving certificate requests
+After=kubelet.service
+
+[Service]
+Type=oneshot
+Environment=KUBECONFIG={{ kubeadm_init_admin_kubeconfig }}
+ExecStart={{ kubeadm_init_approver_script }} {{ kubeadm_init_approver_nodes_file }}

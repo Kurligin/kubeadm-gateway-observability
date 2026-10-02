@@ -5,8 +5,9 @@
 # requests the certificate from the cluster CA instead (signer
 # kubernetes.io/kubelet-serving). Kubernetes never approves these requests
 # on its own: a request only proves which node sent it, not that the names
-# in it belong to that node. They are approved here, after checking that
-# the certificate would name only this node and its addresses.
+# in it belong to that node. They are approved by
+# files/approve-kubelet-serving-csr.sh, for every node of the inventory and
+# only with the names and addresses Ansible knows for that node.
 #
 # New clusters get serverTLSBootstrap from the kubeadm configuration; for a
 # cluster created before it existed, the kubelet configuration on the node
@@ -15,7 +16,9 @@
 # the kubelet does not stop running pods.
 #
 # The certificate is valid for one year; the kubelet requests a new one
-# before it expires, and every `make deploy` approves pending requests.
+# when 70-90 % of that has passed. Pending requests are approved by every
+# `make deploy` and, in between, by an hourly systemd timer on the control
+# plane (same script, same check).
 
 - name: Enable serverTLSBootstrap in the kubelet configuration of this node
   ansible.builtin.lineinfile:
@@ -46,44 +49,104 @@
   register: kubeadm_init_kubelet_configmap
   changed_when: kubeadm_init_kubelet_configmap.stdout == 'changed'
 
+- name: Create the directory for the approver configuration
+  ansible.builtin.file:
+    path: "{{ kubeadm_init_approver_nodes_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Names and addresses each node may have in its certificate (the kubelet
+# puts its host name and node IP there), from the inventory facts of every
+# host (the first play of site.yml gathers them): host name, address of the
+# default route (IPv4 and IPv6), `node_ip` if set; for this node also the
+# API server address it was created with.
+- name: Collect the names and addresses of the inventory nodes
+  ansible.builtin.set_fact:
+    kubeadm_init_serving_nodes: >-
+      {{ kubeadm_init_serving_nodes | default({}) | combine({
+           (hostvars[item]['ansible_facts']['nodename'] | lower):
+             ([hostvars[item]['ansible_facts']['nodename'] | lower,
+               hostvars[item]['ansible_facts']['default_ipv4']['address'] | default(''),
+               hostvars[item]['ansible_facts']['default_ipv6']['address'] | default(''),
+               hostvars[item]['node_ip'] | default(''),
+               kubeadm_init_node_ip if item == inventory_hostname else '']
+              | reject('equalto', '') | unique | list) }) }}
+  loop: "{{ groups['all'] }}"
+  when: hostvars[item]['ansible_facts']['nodename'] is defined
+
+- name: Write the node list for the certificate approver
+  ansible.builtin.copy:
+    content: "{{ kubeadm_init_serving_nodes | to_nice_json }}\n"
+    dest: "{{ kubeadm_init_approver_nodes_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install the certificate approver
+  ansible.builtin.copy:
+    src: approve-kubelet-serving-csr.sh
+    dest: "{{ kubeadm_init_approver_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the certificate approver units
+  ansible.builtin.template:
+    src: "kubelet-cert-approver.{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ kubeadm_init_approver_unit }}.{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [service, timer]
+
+- name: Enable the hourly certificate approver
+  ansible.builtin.systemd_service:
+    name: "{{ kubeadm_init_approver_unit }}.timer"
+    enabled: true
+    state: started
+    daemon_reload: true
+
 - name: Look for the serving certificate of the kubelet
   ansible.builtin.stat:
     path: "{{ kubeadm_init_kubelet_serving_cert }}"
   register: kubeadm_init_serving_cert
 
-# Approves every pending kubelet-serving request of this node whose names
-# are only this node's name and IP addresses; anything else is left
-# pending and reported. Repeated until the kubelet has its certificate
-# (the request appears a moment after the kubelet starts).
-- name: Approve the kubelet serving certificate requests of this node
+# A run interrupted between the configuration change and the kubelet
+# restart leaves a kubelet that never asks for a certificate (the
+# configuration is already in place, so no restart is notified again).
+# Without a certificate and without a request of this node, restart it.
+- name: Look for a certificate request of this node
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      node={{ kubeadm_init_node_name | quote }}
-      allowed=" {{ (ansible_facts['all_ipv4_addresses'] + ansible_facts['all_ipv6_addresses']) | join(' ') }} "
-      approved=0
-      for csr in $(kubectl get csr --output json | jq -r --arg user "system:node:${node}" '.items[]
-          | select(.spec.signerName == "kubernetes.io/kubelet-serving" and .spec.username == $user)
-          | select((.status.conditions // []) | length == 0) | .metadata.name'); do
-        sans="$(kubectl get csr "${csr}" --output jsonpath='{.spec.request}' | base64 -d |
-          openssl req -noout -ext subjectAltName | tail -n +2 | tr ',' '\n' | sed 's/^ *//')"
-        valid=true
-        while read -r san; do
-          case "${san}" in
-            "DNS:${node}" | "") ;;
-            "IP Address:"*) [[ ${allowed} == *" ${san#IP Address:} "* ]] || valid=false ;;
-            *) valid=false ;;
-          esac
-        done <<<"${sans}"
-        if [[ ${valid} == true ]]; then
-          kubectl certificate approve "${csr}" >/dev/null
-          approved=$((approved + 1))
-        else
-          echo "left pending: ${csr} asks for names that are not this node's: ${sans//$'\n'/, }" >&2
-        fi
-      done
-      echo "approved ${approved}"
-      [[ -s {{ kubeadm_init_kubelet_serving_cert | quote }} ]]
+      kubectl get csr --output json | jq --arg user "system:node:{{ kubeadm_init_node_name }}" '[.items[]
+        | select(.spec.signerName == "kubernetes.io/kubelet-serving" and .spec.username == $user)
+        | select((.status.conditions // []) | length == 0)] | length'
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_pending_csr
+  changed_when: false
+  when: not kubeadm_init_serving_cert.stat.exists
+
+- name: Restart the kubelet so that it requests its serving certificate
+  ansible.builtin.systemd_service:
+    name: kubelet
+    state: restarted
+  when:
+    - not kubeadm_init_serving_cert.stat.exists
+    - kubeadm_init_pending_csr.stdout | int == 0
+  changed_when: true
+
+# Repeated until the kubelet of this node has its certificate (the request
+# appears a moment after the kubelet starts).
+- name: Approve the kubelet serving certificate requests
+  ansible.builtin.shell:
+    cmd: >-
+      {{ kubeadm_init_approver_script | quote }} {{ kubeadm_init_approver_nodes_file | quote }}
+      && test -s {{ kubeadm_init_kubelet_serving_cert | quote }}
     executable: /bin/bash
   environment:
     KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"

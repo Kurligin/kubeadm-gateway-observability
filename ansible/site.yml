@@ -1,9 +1,19 @@
 ---
+# Facts of every inventory host first: the names and addresses Ansible knows
+# for each node are what its kubelet serving certificate may contain
+# (role kubeadm_init, tasks/kubelet_serving.yml).
+- name: Gather facts of every node of the inventory
+  hosts: all
+  gather_facts: true
+  tasks: []
+
 # Node preparation and kubeadm control plane bootstrap.
 # The platform layer (Cilium, storage, ...) is installed by helmfile afterwards.
 - name: Prepare the node and bootstrap the Kubernetes control plane
   hosts: control_plane
   become: true
+  # Facts come from the first play.
+  gather_facts: false
   # Proxy for downloads and commands, only if one is configured (see
   # group_vars/all/main.yml); empty otherwise.
   environment: "{{ proxy_env }}"

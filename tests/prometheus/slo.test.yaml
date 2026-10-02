@@ -83,6 +83,9 @@ tests:
       - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
         values: '0x60'
     promql_expr_test:
+      - expr: slo:sli_error:ratio_rate1h{slo="app-availability"}
+        eval_time: 60m
+        exp_samples: []
       - expr: ALERTS{slo="app-availability"}
         eval_time: 60m
         exp_samples: []
@@ -123,3 +126,79 @@ tests:
       - expr: ALERTS{slo="app-latency"}
         eval_time: 90m
         exp_samples: []
+
+  # 5 % errors for an hour, then 35 minutes without errors: the long windows
+  # are still high, but both short windows (5 min, 30 min) have recovered,
+  # so the fast burn alert must stop (the slow one may still be on).
+  - name: availability, short windows recovered -> no fast burn
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x95'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="5"}'
+        values: '0+30x60 1800+0x35'
+    promql_expr_test:
+      - expr: ALERTS{alertname="AppAvailabilityBudgetBurnFast"}
+        eval_time: 95m
+        exp_samples: []
+
+  # 0.7 % errors: 7x the allowed rate. Below the 1 h / 5 min threshold
+  # (14.4x), above the 6 h / 30 min one (6x): fast burn through that pair.
+  - name: availability, 0.7 % errors -> fast burn via 6 h / 30 min
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+1000x150'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="5"}'
+        values: '0+7x150'
+    promql_expr_test:
+      - expr: ALERTS{alertname="AppAvailabilityBudgetBurnFast", alertstate="firing"}
+        eval_time: 2h
+        exp_samples:
+          - labels: 'ALERTS{alertname="AppAvailabilityBudgetBurnFast", alertstate="firing", severity="critical", slo="app-availability"}'
+            value: 1
+
+  # Every request fails, but there are only 0.005 requests per second (18
+  # per hour), below the minimum of 0.01/s: no alert.
+  - name: availability, too little traffic -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+0.3x120'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="5"}'
+        values: '0+0.3x120'
+    promql_expr_test:
+      - expr: ALERTS{slo="app-availability"}
+        eval_time: 90m
+        exp_samples: []
+
+  # No requests: no latency ratio (rather than NaN) and no alert.
+  - name: latency, no traffic -> no ratio, no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="httproute/gateway/app/rule/2", le="250.0"}'
+        values: '0x60'
+      - series: 'envoy_cluster_upstream_rq_time_count{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0x60'
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate5m{slo="app-latency"}
+        eval_time: 60m
+        exp_samples: []
+      - expr: ALERTS{slo="app-latency"}
+        eval_time: 60m
+        exp_samples: []
+
+  # Bucket boundary written as "250" (Prometheus 2 style) works the same.
+  - name: latency, integer bucket boundary -> same ratio
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="httproute/gateway/app/rule/2", le="250"}'
+        values: '0+480x30'
+      - series: 'envoy_cluster_upstream_rq_time_count{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x30'
+    promql_expr_test:
+      - expr: round(slo:sli_error:ratio_rate5m{slo="app-latency"}, 0.0001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{slo="app-latency"}'
+            value: 0.2
