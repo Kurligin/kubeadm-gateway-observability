@@ -180,15 +180,16 @@ spec:
     {{- if .Values.tracing.enabled }}
 
     # --- Distributed tracing ---
-    # Judged by the receiving side, like FluentdNoOutput: every request is
-    # traced (sampling 100 %), so application traffic through the Gateway
-    # must come with spans arriving at VictoriaTraces. The "up" term makes
-    # it pending at once when VictoriaTraces is down.
+    # Judged by both sides, like FluentdNoOutput: Envoy hands spans to its
+    # exporter (envoy_tracing_opentelemetry_spans_sent counts only sampled
+    # spans, so untraced requests -- UI routes, a non-UUID X-Request-ID --
+    # cannot trigger it), but VictoriaTraces ingests none. The "up" term
+    # makes it pending at once when VictoriaTraces is down.
     - name: tracing
       rules:
         - alert: TracingNoSpans
           expr: |
-            (sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m])) > 0)
+            (sum(rate(envoy_tracing_opentelemetry_spans_sent{namespace="{{ .Values.envoyGateway.namespace }}"}[5m])) > 0)
             unless on ()
             (
               (sum(rate(vt_rows_ingested_total{job="{{ .Values.tracing.job }}", type=~"opentelemetry_traces_.*"}[5m])) > 0)
@@ -199,14 +200,42 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "Requests pass the Gateway, but VictoriaTraces receives no spans"
+            summary: "Envoy produces spans, but VictoriaTraces receives none"
             description: >-
-              The application gets requests through the Gateway, but VictoriaTraces has
-              not ingested a single span for 5 minutes (or is not running): traces of
-              these requests are lost (Envoy keeps only a small buffer). Check
+              The Gateway's Envoy proxies keep exporting spans, but VictoriaTraces has
+              not ingested a single one for 5 minutes (or is not running): the traces
+              are lost (Envoy keeps only a small buffer). Check
               `kubectl -n {{ .Values.tracing.namespace }} get pods`, the EnvoyProxy status
               (`kubectl -n {{ .Values.envoyGateway.namespace }} get envoyproxy -o yaml`) and the Envoy
               statistics of the "tracing" cluster.
+
+        # Part of the spans is lost: export attempts of the "tracing" cluster
+        # that failed (5xx, reset with the request in flight, connect
+        # failure), as a share of all attempts. A failed attempt that was
+        # retried counts too, so a few are normal; 5 % over 15 minutes is
+        # not.
+        - alert: TracingExportErrors
+          expr: |
+            (
+              (
+                (sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name="tracing", envoy_response_code_class="5"}[15m])) or vector(0))
+                + (sum(increase(envoy_cluster_upstream_cx_destroy_with_active_rq{envoy_cluster_name="tracing"}[15m])) or vector(0))
+                + (sum(increase(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name="tracing"}[15m])) or vector(0))
+              )
+              /
+              sum(increase(envoy_cluster_upstream_rq_total{envoy_cluster_name="tracing"}[15m]))
+            ) > {{ .Values.tracing.exportErrorRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Envoy fails to export part of its spans"
+            description: >-
+              {{ "{{ $value | humanizePercentage }}" }} of the span exports from the Envoy
+              proxies to VictoriaTraces failed over the last 15 minutes (5xx, connection
+              reset with the request in flight or connect failure): the spans of those
+              batches are missing from the traces. See the Envoy statistics of the
+              "tracing" cluster and the VictoriaTraces logs.
     {{- end }}
 
     # --- Control plane ---

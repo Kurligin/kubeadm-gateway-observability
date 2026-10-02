@@ -79,6 +79,10 @@ KEY_JOBS=(apiserver kubelet kube-controller-manager kube-scheduler etcd-metrics
 readonly TRACING_NAMESPACE=tracing
 readonly TRACING_DEPLOYMENT=victoria-traces
 readonly TRACE_TIMEOUT=60
+# A span batch can still be lost now and then (an export that fails after
+# it was sent is not retried), so a new request with a new trace ID is
+# sent every TRACE_RESEND seconds until one of them is found.
+readonly TRACE_RESEND=20
 readonly TRACE_SERVICE=envoy-gateway
 readonly TRACES_DATASOURCE=traces
 readonly LOGS_DATASOURCE=victorialogs
@@ -549,12 +553,39 @@ check_mirror() {
 # --- 7. Prometheus ------------------------------------------------------------
 
 # Envoy request counter of the app route right before the test traffic
-# (steps 3-6) and the SECONDS value when that traffic started.
+# (steps 3-6), per Envoy pod: JSON object {"<pod>": <value>}.
 envoy_requests_before=""
-traffic_start=0
 
-envoy_requests() {
-  promql_value "sum(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"${APP_CLUSTERS}\"})"
+# envoy_requests_by_pod: the app route request counter of every Envoy pod
+# Prometheus currently has, as a JSON object {"<pod>": <value>}.
+envoy_requests_by_pod() {
+  promql "sum by (pod) (envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"${APP_CLUSTERS}\"})" 2>/dev/null |
+    jq -c 'map({(.metric.pod // ""): (.value[1] | tonumber)}) | add // {}' 2>/dev/null || true
+}
+
+# Right after the Envoy pods were replaced (a rollout, `make add-worker`
+# spreading them over the nodes), Prometheus still has the series of the old
+# pods and has not scraped the new ones yet. Before the baseline, wait (up
+# to 3 min) until the Envoy Deployment has finished rolling out and the
+# Envoy targets that are up are exactly its running pods.
+wait_envoy_series() {
+  have_kubectl || return 0
+  local deployment running scraped deadline=$((SECONDS + 180))
+  deployment="$(kubectl -n envoy-gateway-system get deployments \
+    -l "gateway.envoyproxy.io/owning-gateway-name=${GATEWAY_NAME},gateway.envoyproxy.io/owning-gateway-namespace=${GATEWAY_NAMESPACE}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -z ${deployment} ]] ||
+    kubectl -n envoy-gateway-system rollout status "deployment/${deployment}" --timeout=150s >/dev/null 2>&1 || true
+  while [[ ${SECONDS} -lt ${deadline} ]]; do
+    running="$(kubectl -n envoy-gateway-system get pods \
+      -l app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway \
+      -o json 2>/dev/null | jq -r '.items[] | select(.status.phase == "Running" and .metadata.deletionTimestamp == null) | .metadata.name' |
+      sort | xargs || true)"
+    scraped="$(promql 'up{job="envoy", namespace="envoy-gateway-system"} == 1' 2>/dev/null |
+      jq -r '.[].metric.pod' 2>/dev/null | sort | xargs || true)"
+    [[ -z ${running} || ${scraped} != "${running}" ]] || return 0
+    sleep 5
+  done
 }
 
 # Current scrape state from the targets API, not the "up" series: right
@@ -600,31 +631,28 @@ check_targets() {
 }
 
 # Steps 3-6 sent more than ${CANARY_REQUESTS} requests to the app route.
-# Normally the growth is the difference to the value taken before the
-# traffic (the last scrape before it). If the counter went down, Envoy has
-# restarted since that value was scraped (e.g. after a reboot, the last
-# pre-reboot sample is still returned): then increase() is used, which
-# survives counter resets; its window reaches one scrape interval before
-# the traffic, so the sample preceding it is included.
+# The growth is summed per Envoy pod: the difference to the baseline for a
+# pod that had one, the whole value for a pod whose series appeared later
+# (its counter started at 0 with the pod) or whose counter went down (Envoy
+# restarted in the same pod, e.g. after a reboot). Pods that are gone do
+# not count.
 check_envoy_counter() {
   [[ -n ${UI_PASSWORD} ]] || {
     reason="UI_PASSWORD not set (no kubectl access to read it)"
     return 2
   }
-  local now before=${envoy_requests_before:-0} grown window want=$((CANARY_REQUESTS * 3 / 4))
-  now="$(envoy_requests)"
-  [[ -n ${now} ]] || {
+  local now before=${envoy_requests_before:-} grown want=$((CANARY_REQUESTS * 3 / 4))
+  now="$(envoy_requests_by_pod)"
+  [[ -n ${now} && ${now} != "{}" ]] || {
     reason="envoy_cluster_upstream_rq_total (app route): no data"
     return 1
   }
-  if awk -v n="${now}" -v b="${before}" 'BEGIN { exit !(n >= b) }'; then
-    grown="$(awk -v n="${now}" -v b="${before}" 'BEGIN { print n - b }')"
-    reason="envoy_cluster_upstream_rq_total (app route): ${before} -> ${now}"
-  else
-    window=$((SECONDS - traffic_start + 40))
-    grown="$(promql_value "sum(increase(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"${APP_CLUSTERS}\"}[${window}s]))")"
-    reason="counter reset (Envoy restarted): increase over ${window}s = ${grown:-no data}"
-  fi
+  [[ -n ${before} ]] || before="{}"
+  # shellcheck disable=SC2016 # jq variables
+  grown="$(jq -rn --argjson now "${now}" --argjson before "${before}" '
+    [$now | to_entries[] | .key as $p | .value as $n | ($before[$p]) as $b
+      | if $b == null or $n < $b then $n else $n - $b end] | add // 0')"
+  reason="envoy_cluster_upstream_rq_total (app route): $(jq -rn --argjson b "${before}" '[$b[]] | add // 0') -> $(jq -rn --argjson n "${now}" '[$n[]] | add // 0'), +${grown} over $(jq -rn --argjson n "${now}" '$n | length') pods"
   awk -v g="${grown:-0}" -v w="${want}" 'BEGIN { exit !(g >= w) }' || {
     reason+=", want +${want}"
     return 1
@@ -969,38 +997,58 @@ random_hex() {
   od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# send_traced: a request with a new W3C "traceparent"; its trace ID is
+# appended to $sent_ids.
+sent_ids=()
+send_traced() {
+  local id
+  id="$(random_hex 16)"
+  sent_ids+=("${id}")
+  https app -o /dev/null -H "traceparent: 00-${id}-$(random_hex 8)-01" \
+    "https://app.${DOMAIN}/" 2>/dev/null || true
+}
+
 # A request with a known W3C "traceparent" goes through the Gateway; Envoy
 # continues that trace, so VictoriaTraces must return a trace with exactly
 # this ID (Jaeger query API) holding the Gateway's span of the application
 # route, tagged with the route and the version of the backend that answered.
+# A new request is sent every TRACE_RESEND s; any of them found passes.
 check_trace() {
   tracing || return
   [[ -n ${UI_PASSWORD} ]] || {
     reason="UI_PASSWORD not set (no kubectl access to read it)"
     return 2
   }
-  local start spans summary
-  trace_id="$(random_hex 16)"
+  local start last_sent spans="" summary id
   start=${SECONDS}
-  https app -o /dev/null -H "traceparent: 00-${trace_id}-$(random_hex 8)-01" \
-    "https://app.${DOMAIN}/" 2>/dev/null || true
+  last_sent=${SECONDS}
+  send_traced
   while true; do
+    for id in "${sent_ids[@]}"; do
     # Spans of the Gateway: operation, route tag, backend.version tag.
     # shellcheck disable=SC2016 # jq variables
-    spans="$(traces_get "/select/jaeger/api/traces/${trace_id}" 2>/dev/null | jq -c --arg svc "${TRACE_SERVICE}" '
+      spans="$(traces_get "/select/jaeger/api/traces/${id}" 2>/dev/null | jq -c --arg svc "${TRACE_SERVICE}" '
       [.data[0] as $t | $t.spans[]? | select($t.processes[.processID].serviceName == $svc)
         | {op: .operationName,
            route: ([.tags[] | select(.key == "gateway.route") | .value] | first),
            version: ([.tags[] | select(.key == "backend.version") | .value] | first)}]' 2>/dev/null || true)"
-    summary="$(jq -r --arg ns "${GATEWAY_NAMESPACE}" '[.[] | select((.route // "") | startswith("httproute/\($ns)/app/")) | select(.version == "v1" or .version == "v2")] | first // empty
-      | "route \(.route), backend.version=\(.version)"' <<<"${spans:-[]}" 2>/dev/null || true)"
-    if [[ -n ${summary} ]]; then
-      reason="trace ${trace_id}: $(jq 'length' <<<"${spans}") spans of ${TRACE_SERVICE} after $((SECONDS - start)) s; ${summary}"
-      return 0
-    fi
+      summary="$(jq -r --arg ns "${GATEWAY_NAMESPACE}" '[.[] | select((.route // "") | startswith("httproute/\($ns)/app/")) | select(.version == "v1" or .version == "v2")] | first // empty
+        | "route \(.route), backend.version=\(.version)"' <<<"${spans:-[]}" 2>/dev/null || true)"
+      if [[ -n ${summary} ]]; then
+        trace_id=${id}
+        reason="trace ${trace_id}: $(jq 'length' <<<"${spans}") spans of ${TRACE_SERVICE} after $((SECONDS - start)) s"
+        [[ ${#sent_ids[@]} -eq 1 ]] || reason+=" (request ${#sent_ids[@]} of ${#sent_ids[@]} sent)"
+        reason+="; ${summary}"
+        return 0
+      fi
+    done
     if [[ $((SECONDS - start)) -ge ${TRACE_TIMEOUT} ]]; then
-      reason="trace ${trace_id}: no span of ${TRACE_SERVICE} with the app route and backend version after ${TRACE_TIMEOUT} s (got: ${spans:-nothing})"
+      reason="traces ${sent_ids[*]}: no span of ${TRACE_SERVICE} with the app route and backend version after ${TRACE_TIMEOUT} s (last: ${spans:-nothing})"
       return 1
+    fi
+    if [[ $((SECONDS - last_sent)) -ge ${TRACE_RESEND} ]]; then
+      last_sent=${SECONDS}
+      send_traced
     fi
     sleep 3
   done
@@ -1134,7 +1182,7 @@ setup() {
       *) tracing_state=unknown ;;
     esac
   fi
-  tracing_reason="tracing is off (TRACING=false, or TRACING=auto and the control plane has little memory; see \`make status\`)"
+  tracing_reason="tracing is off (TRACING=false, or TRACING=auto and the control plane has too little memory or disk; see \`make status\`)"
   if [[ ${tracing_state} == on ]]; then
     KEY_JOBS+=(victoria-traces)
   fi
@@ -1152,8 +1200,10 @@ main() {
   check 2 "HTTPRoutes Accepted, references resolved" check_routes 60
 
   # Baseline of the Envoy request counter, before the traffic below.
-  [[ -z ${UI_PASSWORD} ]] || envoy_requests_before="$(envoy_requests)"
-  traffic_start=${SECONDS}
+  if [[ -n ${UI_PASSWORD} ]]; then
+    wait_envoy_series
+    envoy_requests_before="$(envoy_requests_by_pod)"
+  fi
 
   check 3 "HTTP -> 301 to HTTPS" check_http_redirect 60
   check 3 "HTTPS -> 200 \"Hello World!\"" check_https_app 60

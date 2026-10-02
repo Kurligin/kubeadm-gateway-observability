@@ -27,7 +27,8 @@ NODES_INVENTORY = $(if $(strip $(WORKER)),$(WORKER_INVENTORY),$(INVENTORY))
 ANSIBLE_ARGS ?=
 HELMFILE_ARGS ?=
 # Distributed tracing (VictoriaTraces + Envoy spans): auto (on if the control
-# plane has >= TRACING_AUTO_MIN_MEMORY_MIB of memory), true or false. Read by
+# plane has >= TRACING_AUTO_MIN_MEMORY_MIB of memory and
+# >= TRACING_AUTO_MIN_DISK_GIB of disk), true or false. Read by
 # helmfile through scripts/tracing-mode.sh.
 TRACING ?= auto
 export TRACING
@@ -119,7 +120,8 @@ help: ## Show this help
 	@printf '  WORKER=<address>  worker for add-worker / remove-worker (WORKER_USER, SSH_KEY: login over SSH)\n'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
-	@printf '  TRACING=auto|true|false  distributed tracing; auto: on if the control plane has >= %s MiB\n' '$(TRACING_AUTO_MIN_MEMORY_MIB)'
+	@printf '  TRACING=auto|true|false  distributed tracing; auto: on if the control plane has >= %s MiB and >= %s GiB disk\n' \
+		'$(TRACING_AUTO_MIN_MEMORY_MIB)' '$(TRACING_AUTO_MIN_DISK_GIB)'
 	@printf '  FORCE=1           confirm `make destroy` (and `make remove-worker` of a whole INVENTORY)\n'
 
 deploy: ## Node + cluster (Ansible), then platform (helmfile); idempotent

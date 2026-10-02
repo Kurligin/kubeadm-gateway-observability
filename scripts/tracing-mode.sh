@@ -5,7 +5,8 @@
 #   TRACING=true    always
 #   TRACING=false   never (everything tracing-related is removed)
 #   TRACING=auto    (default) on if the control plane node has at least
-#                   TRACING_AUTO_MIN_MEMORY_MIB of memory (versions.env)
+#                   TRACING_AUTO_MIN_MEMORY_MIB of memory and
+#                   TRACING_AUTO_MIN_DISK_GIB of disk (versions.env)
 #
 #   scripts/tracing-mode.sh             prints "true" or "false"
 #   scripts/tracing-mode.sh --explain   prints the decision and its reason
@@ -26,8 +27,8 @@ die() {
   exit 1
 }
 
-# memory_mib <quantity>: a Kubernetes memory quantity (as in node
-# status.capacity) in MiB, rounded down.
+# memory_mib <quantity>: a Kubernetes quantity of bytes (node
+# status.capacity: memory, ephemeral-storage) in MiB, rounded down.
 memory_mib() {
   local q=$1
   case ${q} in
@@ -44,7 +45,8 @@ main() {
   [[ ${1:-} != "--explain" ]] || explain=true
 
   local mode=${TRACING:-auto} enabled reason
-  mode=${mode,,}
+  # Lower case without bash 4 (`make status` may run on macOS bash 3.2).
+  mode="$(tr '[:upper:]' '[:lower:]' <<<"${mode}")"
   case ${mode} in
     true | on | 1)
       enabled=true
@@ -55,25 +57,32 @@ main() {
       reason="TRACING=${TRACING}"
       ;;
     auto)
-      local min server quantity mib
+      local min min_disk server quantity mib disk
       min="$(sed -n 's/^TRACING_AUTO_MIN_MEMORY_MIB=//p' "${REPO_DIR}/versions.env")"
       [[ ${min} =~ ^[0-9]+$ ]] || die "TRACING_AUTO_MIN_MEMORY_MIB missing in versions.env"
+      min_disk="$(sed -n 's/^TRACING_AUTO_MIN_DISK_GIB=//p' "${REPO_DIR}/versions.env")"
+      [[ ${min_disk} =~ ^[0-9]+$ ]] || die "TRACING_AUTO_MIN_DISK_GIB missing in versions.env"
       server="$(kubectl config view --minify --output 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null || true)"
       if [[ -z ${server} ]]; then
         enabled=true
         reason="TRACING=auto, no cluster configured (offline rendering)"
       else
         quantity="$(kubectl get nodes --selector node-role.kubernetes.io/control-plane \
-          --output 'jsonpath={.items[0].status.capacity.memory}' 2>/dev/null)" ||
+          --output 'jsonpath={.items[0].status.capacity.memory} {.items[0].status.capacity.ephemeral-storage}' 2>/dev/null)" ||
           die "cannot read the control plane node (TRACING=auto); set TRACING=true or TRACING=false"
-        [[ -n ${quantity} ]] || die "no control plane node found (TRACING=auto); set TRACING=true or TRACING=false"
-        mib="$(memory_mib "${quantity}")"
-        if [[ ${mib} -ge ${min} ]]; then
-          enabled=true
-          reason="TRACING=auto, control plane memory ${mib} MiB >= ${min} MiB"
-        else
+        [[ -n ${quantity% *} && -n ${quantity#* } ]] ||
+          die "no control plane node found (TRACING=auto); set TRACING=true or TRACING=false"
+        mib="$(memory_mib "${quantity% *}")"
+        disk=$(($(memory_mib "${quantity#* }") / 1024))
+        if [[ ${mib} -lt ${min} ]]; then
           enabled=false
           reason="TRACING=auto, control plane memory ${mib} MiB < ${min} MiB; TRACING=true forces it on"
+        elif [[ ${disk} -lt ${min_disk} ]]; then
+          enabled=false
+          reason="TRACING=auto, control plane disk ${disk} GiB < ${min_disk} GiB; TRACING=true forces it on"
+        else
+          enabled=true
+          reason="TRACING=auto, control plane memory ${mib} MiB >= ${min} MiB, disk ${disk} GiB >= ${min_disk} GiB"
         fi
       fi
       ;;

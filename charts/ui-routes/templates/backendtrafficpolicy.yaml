@@ -1,0 +1,33 @@
+{{- /*
+With tracing on, the UI routes are not traced: their requests (Grafana
+panels, PromQL and LogsQL queries in the URL) would fill the trace storage
+with the observability stack watching itself, and they would keep the
+TracingNoSpans alert quiet without any application traffic. A route-level
+sampling of 0 % overrides the 100 % of the EnvoyProxy.
+*/}}
+{{- if .Values.disableTracing }}
+{{- range .Values.routes }}
+{{- $name := printf "ui-%s" .host }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "ui-routes.labels" $ | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  telemetry:
+    tracing:
+      samplingFraction:
+        numerator: 0
+        denominator: 100
+      overallSamplingFraction:
+        numerator: 0
+        denominator: 100
+{{- end }}
+{{- end }}

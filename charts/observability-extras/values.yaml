@@ -42,6 +42,8 @@ tracing:
   datasourceUid: traces
   # Prometheus job of VictoriaTraces.
   job: victoria-traces
+  # TracingExportErrors: share of failed span exports (15 min) that fires.
+  exportErrorRatio: 0.05
   namespace: tracing
 
 # Webhook receiver of Alertmanager (files/alert_receiver.py): writes every

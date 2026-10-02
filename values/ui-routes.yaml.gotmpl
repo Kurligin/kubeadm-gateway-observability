@@ -6,6 +6,9 @@ gateway:
 basicAuth:
   secretName: {{ .Values.basicAuth.secretName | quote }}
 
+# Gateway tracing is on: the UI routes themselves are not traced.
+disableTracing: {{ .Values.tracing.enabled }}
+
 # Observability UIs, https://<host>.<domain>. Grafana has its own login
 # (admin password in a Secret, see `make ui`); Prometheus, Alertmanager and
 # vmui have no authentication of their own, so the Gateway asks for basic

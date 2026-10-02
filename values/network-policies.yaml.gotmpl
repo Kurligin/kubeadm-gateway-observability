@@ -119,9 +119,12 @@ namespaces:
         ports: [24231]
   {{- if .Values.tracing.enabled }}
 
-  # VictoriaTraces: spans in from the Envoy proxies only (OTLP/gRPC);
-  # queries from Grafana and the traces UI (Gateway); metrics for
-  # Prometheus. Nothing else may write spans.
+  # VictoriaTraces: OTLP/gRPC (4317) from the Envoy proxies only; the HTTP
+  # port (10428: queries, metrics, but also OTLP/HTTP ingestion) from
+  # Grafana, the Envoy proxies (traces UI, where the route lets only
+  # /select/* through) and Prometheus. A NetworkPolicy cannot filter by
+  # path, so these pods (and the node itself) could write spans over HTTP
+  # as well; no other pod can.
   - name: {{ .Values.tracing.namespace | quote }}
     allow:
       - name: otlp-from-envoy

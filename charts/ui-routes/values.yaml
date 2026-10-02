@@ -26,3 +26,7 @@ basicAuth:
 # Without "allow" every request is forwarded. A request that matches no
 # entry gets 404 from Envoy and never reaches the backend.
 routes: []
+
+# Gateway tracing is on: do not trace the UI routes (sampling 0 %, one
+# BackendTrafficPolicy per route).
+disableTracing: false

@@ -42,9 +42,11 @@ http {
     # Logged as trace_id, the same field the gateway's access log and
     # Grafana's trace-to-logs links use. Only for sampled traces (flag bit
     # 0 set, i.e. an odd last digit): an unsampled trace is never stored,
-    # so its ID would lead nowhere. Empty without a valid header.
+    # so its ID would lead nowhere. Invalid per W3C (version ff, all-zero
+    # trace or parent ID) and anything else: empty. A traceparent the client
+    # sent itself is logged too, also with tracing off at the gateway.
     map $http_traceparent $trace_id {
-        "~^[0-9a-f]{2}-(?<tid>[0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f][13579bdf]$" $tid;
+        "~^(?!ff)[0-9a-f]{2}-(?!0{32})(?<tid>[0-9a-f]{32})-(?!0{16})[0-9a-f]{16}-[0-9a-f][13579bdf]$" $tid;
         default "";
     }
 

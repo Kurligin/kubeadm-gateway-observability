@@ -96,6 +96,12 @@ spec:
             name: {{ required "tracing.service is required" .service }}
             namespace: {{ required "tracing.namespace is required" .namespace }}
             port: {{ .port }}
+        {{- with .backendSettings }}
+        # Connection to the trace storage: see tracing.backendSettings in
+        # values.yaml.
+        backendSettings:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       # Span attributes (Envoy command operators): the matched route and
       # what the backend reports about itself.
       tags:

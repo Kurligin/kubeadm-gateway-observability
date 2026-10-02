@@ -59,6 +59,32 @@ tracing:
   service: ""
   namespace: ""
   port: 4317
+  # Export of span batches (one gRPC request every 5 s per proxy).
+  # VictoriaTraces closes an idle gRPC connection after a few seconds; when
+  # that crosses a new export, the batch is lost (the exporter does not
+  # retry by itself): ~4 % of the exports were, before this. So Envoy
+  # closes idle connections first, and an export that provably never
+  # reached the storage is retried. A plain "reset" (after the request was
+  # sent) is not retried: the storage may already have the spans, and a
+  # retry would store them twice.
+  backendSettings:
+    timeout:
+      http:
+        connectionIdleTimeout: 2s
+        requestTimeout: 5s
+    retry:
+      numRetries: 2
+      perRetry:
+        timeout: 2s
+        backOff:
+          baseInterval: 100ms
+          maxInterval: 1s
+      retryOn:
+        triggers:
+          - connect-failure
+          - reset-before-request
+          - refused-stream
+          - unavailable
   tags:
     # Envoy route of the request (httproute/<ns>/<route>/rule/<n>/...).
     gateway.route: "%ROUTE_NAME%"

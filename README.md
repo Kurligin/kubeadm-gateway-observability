@@ -83,13 +83,16 @@ vmui и UI трейсов через тот же Gateway. Повторный з�
   |---|---|
   | метрики Prometheus | 3 ГБ (`retentionSize`) + WAL ~0,5 ГБ |
   | логи в VictoriaLogs | 2 ГБ (`retentionDiskSpaceUsage`) |
-  | трейсы в VictoriaTraces (если включены) | 1 ГБ (`retentionDiskSpaceUsage`), 3 дня |
+  | трейсы в VictoriaTraces (если включены) | 1 ГБ (`retentionDiskSpaceUsage`, потолок мягкий: старые дни удаляются после превышения), 3 дня |
   | буфер Fluentd | 256 МБ |
   | логи контейнеров на узле | ротация kubelet (10 МБ × 5 файлов на контейнер, старые сжаты), на практике < 0,5 ГБ |
 
-  Итого пик ~16 ГБ. На диске 20 ГБ это ~80 %: чуть ниже порога, с
-  которого kubelet начинает удалять образы (85 %), поэтому 20 ГБ — минимум,
-  а с запасом — 30 ГБ.
+  Итого пик ~16 ГБ без трейсинга. На диске 20 ГБ это ~80 %: чуть ниже
+  порога, с которого kubelet начинает удалять образы (85 %), поэтому 20 ГБ
+  — минимум, а с запасом — 30 ГБ. С трейсингом пик ~17 ГБ, и 20 ГБ уже
+  мало: `TRACING=auto` включает его, только если диск узла control plane
+  не меньше 22 ГиБ (ёмкость, которую показывает kubelet; диск «25 ГБ» и
+  больше).
 - постоянный IP узла (статический или резервирование DHCP): kubeadm вшивает
   адрес в кластер, и если после перезагрузки узел получит другой, control
   plane не поднимется (развёртывание это распознает и подскажет, что делать);
@@ -124,7 +127,8 @@ git clone <repo-url> && cd kubeadm-gateway-observability
    повторами при сбое сети; первая установка не печатает diff (десятки тысяч строк:
    все манифесты платформы), повторные — печатают только изменения.
 
-Трейсинг ставится, если у узла control plane не меньше 6 ГБ памяти;
+Трейсинг ставится, если у узла control plane не меньше 6 ГБ памяти и
+22 ГиБ диска;
 включить или выключить явно — `TRACING=true ./deploy.sh` или
 `TRACING=false ./deploy.sh` (подробнее — «Трейсинг»).
 
@@ -300,9 +304,9 @@ make verify        # на узле: адрес, CA и пароль берутс�
 | 4 | 200 запросов: доля v2 в коридоре 5–20 % (вес 10 %); `/v2` и `X-Canary: true` → всегда v2; в ответах `/` и `/v2` есть заголовок `x-gateway-route` с именем правила, внутреннего `x-backend-pod` нет |
 | 5 | `/limited`: из 25 запросов (10 × 2 реплики Envoy + 5) не больше 20 успешных и хотя бы один 429 от rate limit Envoy (заголовок `x-ratelimit-limit: 10`); основной маршрут при этом отвечает 200 |
 | 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API); поддельный `X-Gateway-Route` клиента до Angie не дошёл (заменён фильтром маршрута); копия этого же запроса (зеркало) пришла в web-v2 на теневой порт (`traffic: shadow`) |
-| 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A` (metrics-server); алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
+| 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6 (по каждому поду Envoy; если поды только что заменены — например, `make add-worker` разнёс их по узлам, — проверка сначала ждёт конца rollout и первого сбора новых подов); PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A` (metrics-server); алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
 | 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway не проходят (404); etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для локальной сети (проверяется только с другой машины) |
-| 10 | только при включённом трейсинге (иначе одна строка «пропущено» с причиной): запрос со сгенерированным `traceparent` (W3C) через Gateway → трейс с этим ID в VictoriaTraces (Jaeger API через `traces.demo.local`) за ≤ 60 с, в нём спан Envoy с маршрутом приложения (`gateway.route`) и версией ответившего бэкенда (`backend.version`); этот `trace_id` есть в access-логе Angie в VictoriaLogs; Grafana: datasource трейсов отдаёт этот трейс, ссылки лог → трейс и трейс → логи настроены |
+| 10 | только при включённом трейсинге (иначе одна строка «пропущено» с причиной): запрос со сгенерированным `traceparent` (W3C) через Gateway (каждые 20 с — новый запрос с новым ID: редкая потеря пачки спанов не роняет проверку) → трейс с этим ID в VictoriaTraces (Jaeger API через `traces.demo.local`) за ≤ 60 с, в нём спан Envoy с маршрутом приложения (`gateway.route`) и версией ответившего бэкенда (`backend.version`); этот `trace_id` есть в access-логе Angie в VictoriaLogs; Grafana: datasource трейсов отдаёт этот трейс, ссылки лог → трейс и трейс → логи настроены |
 | 9 | только при нескольких узлах (на одном — одна строка «пропущено»): поды всех DaemonSet готовы на каждом узле (Cilium, Fluentd, node-exporter — на всех); Envoy и web-v1/web-v2 работают больше чем на одном узле; Gateway отвечает 200 по адресу каждого узла; `kubectl logs` пода на воркере и `kubectl top` воркера; логи подов воркера есть в VictoriaLogs; node-exporter и kubelet каждого узла `up` в Prometheus |
 
 Повторный запуск в течение минуты корректен: rate limit `/limited`
@@ -587,7 +591,8 @@ VictoriaLogs. Источник данных VictoriaLogs — плагин
 | `FluentdNoOutput` | Fluentd читает логи, а VictoriaLogs 5 мин не принимает ни одной строки (`vl_rows_ingested_total` не растёт или VictoriaLogs недоступна) — судим по принимающей стороне: счётчик записей Fluentd растёт и на неудачных попытках |
 | `FluentdBufferErrors`, `FluentdBufferAlmostFull` | ретраи/ошибки отправки за 10 мин; буфер заполнен больше чем на 80 % |
 | `EtcdMetricsMissing` | метрики etcd (через прокси) не собираются 5 мин |
-| `TracingNoSpans` (если включён трейсинг) | приложение получает запросы через Gateway, а VictoriaTraces 5 мин не принимает ни одного спана или недоступна — по аналогии с `FluentdNoOutput`, судим по принимающей стороне; 4 сценария `promtool test rules` в `tests/prometheus/tracing.test.yaml` |
+| `TracingNoSpans` (если включён трейсинг) | Envoy отдаёт спаны экспортёру (`envoy_tracing_opentelemetry_spans_sent` — только семплированные, поэтому нетрассируемые запросы его не будят), а VictoriaTraces 5 мин не принимает ни одного или недоступна — по аналогии с `FluentdNoOutput` |
+| `TracingExportErrors` (если включён трейсинг) | больше 5 % попыток экспорта спанов из Envoy за 15 мин неудачны (5xx, обрыв соединения с запросом в полёте, ошибка соединения), 10 мин; повторённая и удавшаяся попытка тоже считается, поэтому единичные — норма. Оба алерта — 7 сценариев `promtool test rules` в `tests/prometheus/tracing.test.yaml` |
 | `AppAvailabilityBudgetBurnFast` / `…Slow` | SLO 99,9 % ответов без 5xx (30 дней): бюджет ошибок тратится в 14,4× быстрее за 1 ч и 5 мин или в 6× за 6 ч и 30 мин (critical); в 3× за 1 д и 2 ч или в 1× за 3 д и 6 ч (warning) — схема multi-window multi-burn-rate из Google SRE Workbook |
 | `AppLatencyBudgetBurnFast` / `…Slow` | SLO 99 % запросов быстрее 250 мс (время ответа приложения по гистограмме Envoy), те же окна и пороги |
 
@@ -746,14 +751,38 @@ flowchart LR
   Collector — это ещё ~100 МБ памяти и ещё один компонент. Envoy пишет
   прямо в VictoriaTraces по OTLP/gRPC (Service с `appProtocol: grpc` — иначе
   Envoy Gateway говорил бы с ним по HTTP/1.1). Внутри кластера gRPC без TLS,
-  как Fluentd → VictoriaLogs; принимать спаны NetworkPolicy разрешает
-  только Envoy-прокси.
+  как Fluentd → VictoriaLogs; порт OTLP/gRPC NetworkPolicy открывает
+  только Envoy-прокси. HTTP-порт 10428 (запросы, метрики — и, увы, приём
+  OTLP/HTTP тоже) открыт Grafana, Envoy-прокси (UI) и Prometheus: путь
+  NetworkPolicy не различает, снаружи же через Gateway проходит только
+  `/select/*`.
+- **Экспорт без потерь.** VictoriaTraces закрывает простаивающее
+  gRPC-соединение через несколько секунд, а экспортёр Envoy не повторяет
+  неудачную отправку: пачка, совпавшая с закрытием, терялась (~4 % отправок
+  — `envoy_cluster_upstream_cx_destroy_with_active_rq` кластера `tracing`).
+  Поэтому Envoy закрывает простаивающее соединение сам раньше (2 с,
+  `tracing.backendSettings` в `charts/gateway/values.yaml`) и повторяет
+  отправку, которая точно не дошла (`connect-failure`,
+  `reset-before-request`, `refused-stream`, `unavailable`); обрыв после
+  отправки не повторяется, чтобы спаны не записались дважды.
+- **UI-маршруты не трассируются**: запросы Grafana, PromQL и LogsQL в
+  URL засоряли бы хранилище наблюдением самих себя (и `http.url` с
+  запросом хранился бы 3 дня), а алерт `TracingNoSpans` видел бы «трафик»
+  без приложения. На каждый `ui-*` — BackendTrafficPolicy с
+  `telemetry.tracing.samplingFraction` 0 % (чарт `charts/ui-routes`,
+  только при включённом трейсинге).
 - **Angie** своих спанов не создаёт: в образе `angie:*-minimal` нет
   динамических модулей (модуль OpenTelemetry — отдельный пакет, с ним
   пришлось бы брать другой образ). Он берёт trace ID из `traceparent`
-  (`map` по регулярному выражению W3C) и пишет его в JSON access-лог полем
+  (`map` по регулярному выражению W3C: версия не `ff`, trace ID и parent ID
+  не из одних нулей, флаг sampled) и пишет его в JSON access-лог полем
   `trace_id`; то же поле (`%TRACE_ID%`) — в access-логе Envoy. Так лог и
   трейс связаны честно, без «рисованных» спанов приложения.
+- **`X-App-Version` видна клиенту** — решение, а не недосмотр: заголовок,
+  который фильтр маршрута удаляет из ответа, к моменту записи тега спана
+  уже удалён (проверено), а версия и так есть в теле ответа
+  (`Hello World! version=v1`). Внутренний `X-Backend-Pod` по-прежнему
+  удаляется.
 - **Хранилище — VictoriaTraces** (single node, Deployment с PVC local-path
   на control plane, namespace `tracing`, Pod Security `restricted`). Почему
   оно, а не Tempo или Jaeger:
@@ -785,18 +814,28 @@ flowchart LR
 
 | `TRACING` | что будет |
 |---|---|
-| `auto` (по умолчанию) | включён, если у узла control plane не меньше 5632 МиБ памяти (так ядро показывает ВМ на 6 ГБ; ВМ на 8 ГБ — ~7,9 ГиБ, на 4 ГБ — ~3,8 ГиБ). Решение — по памяти control plane: VictoriaTraces живёт там (её том привязан к узлу) |
+| `auto` (по умолчанию) | включён, если у узла control plane не меньше 5632 МиБ памяти (так ядро показывает ВМ на 6 ГБ; ВМ на 8 ГБ — ~7,9 ГиБ, на 4 ГБ — ~3,8 ГиБ). и не меньше 22 ГиБ диска. Решение — по control plane: VictoriaTraces живёт там (её том привязан к узлу) |
 | `true` | включён всегда (например, на 4 ГБ: доступной памяти остаётся ~0,57 ГБ вместо ~0,69, проверено) |
 | `false` | выключен; если был включён — всё удаляется |
 
+`auto` к тому же требует диск control plane от 22 ГиБ (см.
+«Требования»). Решение принимается заново при каждом развёртывании по
+ёмкости узла, которую показывает kubelet. Если память ВМ меняется на
+ходу (ballooning в Proxmox и т. п.) или узел пересоздают с другим размером,
+`auto` может однажды выключить трейсинг (вместе с данными) — на таких
+стендах задайте `TRACING=true` или `TRACING=false` явно; `auto` рассчитан
+на первую установку и неизменный узел.
+
 `make platform` печатает решение (`==> tracing: on (TRACING=auto, control
-plane memory 7941 MiB >= 5632 MiB)`), `make status` — что развёрнуто
-сейчас. Выключение удаляет релиз VictoriaTraces (вместе с томом и
+plane memory 7941 MiB >= 5632 MiB, disk 37 GiB >= 22 GiB)`), `make status`
+— что развёрнуто сейчас. Выключение удаляет релиз VictoriaTraces (вместе с томом и
 данными), namespace `tracing`, его NetworkPolicy, маршрут
 `traces.demo.local`, источник `Traces` в Grafana (у него `prune: true`) и
-блок `tracing` в EnvoyProxy (без перезапуска подов Envoy: это xDS); поле
-`trace_id` в access-логах при этом пустое (VictoriaLogs пустые поля не
-хранит). Проверить, что ничего не осталось:
+блок `tracing` в EnvoyProxy (без перезапуска подов Envoy: это xDS), а
+также BackendTrafficPolicy UI-маршрутов. Поле `trace_id` в access-логе
+Envoy при этом пустое (VictoriaLogs пустые поля не хранит); в логе Angie оно
+появится, только если клиент сам прислал семплированный `traceparent`
+(Envoy без трейсинга передаёт заголовок как есть). Проверить, что ничего не осталось:
 
 ```bash
 TRACING=false make platform
@@ -841,7 +880,8 @@ TraceID (ввести ID) или Search (сервис `envoy-gateway`).
 без своего ID (Envoy создаёт UUID сам) или с UUID трассируется. Отключить
 это в Envoy Gateway 1.9 можно только патчем xDS (EnvoyPatchPolicy) — не
 делали. Чтобы ссылки не вели в пустоту, Angie пишет `trace_id` только для
-трейсов с флагом sampled; в access-логе Envoy поле есть всегда.
+трейсов с флагом sampled; Envoy же пишет свой trace ID у каждого запроса,
+и у нетрассируемого «View trace» из его записи покажет «trace not found».
 
 ### Безопасность (шаг 8)
 
@@ -1165,7 +1205,7 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   | Grafana 3000 | Envoy-прокси (UI) |
   | VictoriaLogs 9428 | Fluentd (запись), Grafana и Envoy-прокси (чтение), Prometheus |
   | VictoriaTraces 4317 (OTLP/gRPC, запись) | только Envoy-прокси |
-  | VictoriaTraces 10428 (запросы, UI, метрики) | Grafana, Envoy-прокси (UI), Prometheus |
+  | VictoriaTraces 10428 (запросы, UI, метрики; на нём же и приём OTLP/HTTP) | Grafana, Envoy-прокси (UI, только `/select/*`), Prometheus |
   | Envoy-прокси 10080/10443 (Gateway 80/443) | откуда угодно |
   | вебхуки cert-manager (10250) и Envoy Gateway (9443) | API-сервер (порт открыт для всех: вебхук — это TLS, принимает только AdmissionReview) |
   | внутри `envoy-gateway-system` | прокси ↔ контроллер (xDS) |

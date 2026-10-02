@@ -1,5 +1,5 @@
 ---
-# Unit tests of the TracingNoSpans alert
+# Unit tests of the tracing alerts TracingNoSpans and TracingExportErrors
 # (charts/observability-extras/templates/prometheusrule.yaml, rendered with
 # tracing enabled). Run by `make lint` (scripts/check-rules.sh).
 rule_files:
@@ -8,14 +8,14 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
-  # Requests flow and spans arrive: no alert.
-  - name: traffic with spans -> no alert
+  # Envoy exports spans and they arrive: no alert.
+  - name: spans exported and ingested -> no alert
     interval: 1m
     input_series:
-      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+      - series: 'envoy_tracing_opentelemetry_spans_sent{namespace="envoy-gateway-system", pod="envoy-a"}'
         values: '0+60x30'
       - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
-        values: '0+120x30'
+        values: '0+60x30'
       - series: 'up{job="victoria-traces"}'
         values: '1x30'
     alert_rule_test:
@@ -23,12 +23,12 @@ tests:
         eval_time: 20m
         exp_alerts: []
 
-  # Requests flow, VictoriaTraces is up, but no span arrives (e.g. Envoy
+  # Envoy exports spans, VictoriaTraces is up, but none arrives (e.g. Envoy
   # cannot reach it): the alert fires after 5 min of pending.
-  - name: traffic without spans -> TracingNoSpans
+  - name: spans exported, none ingested -> TracingNoSpans
     interval: 1m
     input_series:
-      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+      - series: 'envoy_tracing_opentelemetry_spans_sent{namespace="envoy-gateway-system", pod="envoy-a"}'
         values: '0+60x30'
       - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
         values: '500x30'
@@ -43,13 +43,13 @@ tests:
 
   # VictoriaTraces is down: its counter still has a rate from the last
   # samples, but "up" is 0, so the alert fires as well.
-  - name: traffic, VictoriaTraces down -> TracingNoSpans
+  - name: spans exported, VictoriaTraces down -> TracingNoSpans
     interval: 1m
     input_series:
-      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+      - series: 'envoy_tracing_opentelemetry_spans_sent{namespace="envoy-gateway-system", pod="envoy-a"}'
         values: '0+60x30'
       - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
-        values: '0+120x30'
+        values: '0+60x30'
       - series: 'up{job="victoria-traces"}'
         values: '0x30'
     promql_expr_test:
@@ -59,15 +59,15 @@ tests:
           - labels: 'ALERTS{alertname="TracingNoSpans", alertstate="firing", severity="warning"}'
             value: 1
 
-  # No application traffic, no spans: nothing to complain about. Spans of
-  # other routes (UIs) and mirror clusters do not count as traffic.
-  - name: idle -> no alert
+  # Application traffic that is not traced (UI routes, a non-UUID
+  # X-Request-ID): Envoy exports no spans, so nothing is missing.
+  - name: traffic without sampled spans -> no alert
     interval: 1m
     input_series:
       - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
-        values: '100x30'
-      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2-mirror-0"}'
         values: '0+60x30'
+      - series: 'envoy_tracing_opentelemetry_spans_sent{namespace="envoy-gateway-system", pod="envoy-a"}'
+        values: '100x30'
       - series: 'vt_rows_ingested_total{job="victoria-traces", type="opentelemetry_traces_otlpgrpc"}'
         values: '500x30'
       - series: 'up{job="victoria-traces"}'
@@ -75,4 +75,45 @@ tests:
     alert_rule_test:
       - alertname: TracingNoSpans
         eval_time: 20m
+        exp_alerts: []
+
+  # 12 exports a minute, one in ten fails (reset with the request in
+  # flight): 10 % > 5 % -> TracingExportErrors.
+  - name: 10 % failed exports -> TracingExportErrors
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="tracing", pod="envoy-a"}'
+        values: '0+12x40'
+      - series: 'envoy_cluster_upstream_cx_destroy_with_active_rq{envoy_cluster_name="tracing", pod="envoy-a"}'
+        values: '0+1.2x40'
+    promql_expr_test:
+      - expr: ALERTS{alertname="TracingExportErrors", alertstate="firing"}
+        eval_time: 30m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TracingExportErrors", alertstate="firing", severity="warning"}'
+            value: 1
+
+  # 1 % failed (5xx), below the 5 % threshold; no connect failures series
+  # at all: no alert.
+  - name: 1 % failed exports -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="tracing", pod="envoy-a"}'
+        values: '0+100x40'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="tracing", envoy_response_code_class="5", pod="envoy-a"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - alertname: TracingExportErrors
+        eval_time: 30m
+        exp_alerts: []
+
+  # No exports at all (tracing idle): the ratio has no value, no alert.
+  - name: no exports -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="tracing", pod="envoy-a"}'
+        values: '50x40'
+    alert_rule_test:
+      - alertname: TracingExportErrors
+        eval_time: 30m
         exp_alerts: []
