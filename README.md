@@ -208,6 +208,22 @@ curl --cacert ca.crt --resolve app.demo.local:443:192.168.56.10 https://app.demo
 передаются в `./deploy.sh`. У box диск 64 ГБ (тонкий), корневой раздел
 в госте — 31 ГБ.
 
+Box и сам Vagrant раздаёт HashiCorp; из некоторых сетей (в том числе из
+России) `vagrant up` получает 404 при скачивании box. Тогда box
+(`https://vagrantcloud.com/bento/boxes/ubuntu-24.04/versions/202508.03.0/providers/<libvirt|virtualbox>/amd64/vagrant.box`)
+скачивается любым доступным способом и регистрируется локально с версией,
+которую ждёт `Vagrantfile`, плагин vagrant-libvirt ставится с rubygems.org:
+
+```bash
+cat > box.json <<'JSON'
+{"name": "bento/ubuntu-24.04", "versions": [{"version": "202508.03.0", "providers": [
+  {"name": "libvirt", "architecture": "amd64", "default_architecture": true,
+   "url": "file:///path/to/vagrant.box"}]}]}
+JSON
+vagrant box add box.json
+vagrant plugin install vagrant-libvirt --plugin-clean-sources --plugin-source https://rubygems.org
+```
+
 Проверено с libvirt (Vagrant 2.4.9, vagrant-libvirt 0.12.2, вложенная
 виртуализация на ВМ Ubuntu 24.04): `VM_CPUS=2 VM_MEMORY=4096 vagrant up
 --provider=libvirt` — 12,7 мин до готового решения, `make verify` в ВМ —
