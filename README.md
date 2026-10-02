@@ -1,5 +1,8 @@
 # kubeadm + Gateway API + observability
 
+[![lint](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/lint.yml)
+[![e2e](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/e2e.yml)
+
 > Черновик README. Реализованы узел, кластер kubeadm, CNI, хранилище, TLS,
 > Gateway API, демо-приложение, мониторинг (Prometheus, Grafana, алерты),
 > логи (Fluentd → VictoriaLogs), политики безопасности и сквозная проверка
@@ -172,6 +175,47 @@ apt (archive.ubuntu.com), pkgs.k8s.io, github.com, get.helm.sh,
 docker.angie.software), grafana.com. Повторный запуск без прокси убрал
 настройки (changed=3), следующий — changed=0.
 
+### Нет Ubuntu 24.04? `vagrant up`
+
+[`Vagrantfile`](Vagrantfile) поднимает ВМ Ubuntu 24.04 (box
+`bento/ubuntu-24.04` закреплённой версии), копирует в неё репозиторий и
+запускает `./deploy.sh`; Gateway слушает адрес ВМ в private network, до
+которого есть доступ с вашей машины.
+
+Нужно: amd64 (x86_64) с аппаратной виртуализацией, Vagrant ≥ 2.4 и
+VirtualBox ≥ 7 или libvirt/KVM с плагином `vagrant-libvirt`, `rsync`,
+~8 ГБ свободной памяти и ~30 ГБ диска. **Apple Silicon (arm64) не
+поддерживается**: решение и образы — только amd64.
+
+```bash
+vagrant up                        # VirtualBox
+vagrant up --provider=libvirt     # libvirt/KVM
+VM_CPUS=2 VM_MEMORY=4096 vagrant up            # минимум (по умолчанию 4 vCPU / 8 ГБ)
+VM_IP=192.168.57.10 vagrant up    # другой адрес (по умолчанию 192.168.56.10)
+```
+
+В конце `vagrant up` печатает, как проверить:
+
+```bash
+vagrant ssh -c 'cd kubeadm-gateway-observability && make verify'      # внутри ВМ
+# с вашей машины (нужны curl и jq)
+vagrant ssh --no-tty -c 'cd kubeadm-gateway-observability && make ca >/dev/null && cat ca.crt' > ca.crt
+curl --cacert ca.crt --resolve app.demo.local:443:192.168.56.10 https://app.demo.local/
+```
+
+`vagrant provision` повторяет развёртывание (идемпотентно), после правок
+на хосте — сначала `vagrant rsync`. `HTTP(S)_PROXY`/`NO_PROXY`, если заданы,
+передаются в `./deploy.sh`. У box диск 64 ГБ (тонкий), корневой раздел
+в госте — 31 ГБ.
+
+Проверено с libvirt (Vagrant 2.4.9, vagrant-libvirt 0.12.2, вложенная
+виртуализация на ВМ Ubuntu 24.04): `VM_CPUS=2 VM_MEMORY=4096 vagrant up
+--provider=libvirt` — 12,7 мин до готового решения, `make verify` в ВМ —
+26 ✓ и 1 пропуск (порт метрик Cilium с самого узла не проверить), с хоста
+по адресу 192.168.56.10 — 21 ✓, остальные 6 проверок требуют kubectl и
+пропускаются. С VirtualBox проверен только `vagrant validate`: машины с
+VirtualBox у нас не было.
+
 ## Команды
 
 | Команда | Что делает |
@@ -186,7 +230,7 @@ docker.angie.software), grafana.com. Повторный запуск без пр
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
 | `make images` | после `make cluster`: скачать в containerd все образы из `images.txt` (по digest) и образы control plane kubeadm; уже скачанные пропускаются |
 | `make images-list` | пересобрать `images.txt` из отрендеренных манифестов (после смены версий в `versions.env`) |
-| `make lint-deps && make lint` | без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален |
+| `make lint-deps && make lint` | без кластера, но с интернетом (проверка образов рендерит чарты `helmfile template`, им нужны репозитории чартов): shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален; kubeconform, trivy config и kube-linter по отрендеренным манифестам (см. «CI/CD») |
 
 ## Проверка
 
@@ -641,6 +685,49 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-check","image":"docker.io/curlimages/curl:8.16.0","args":["-sS","-m","5","-X","POST","http://kube-prometheus-stack-prometheus.monitoring:9090/-/quit"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
 # curl: (28) Connection timed out — пакеты отброшены политикой
 ```
+
+## CI/CD
+
+Два workflow GitHub Actions на раннерах `ubuntu-24.04`:
+
+- [`lint`](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/lint.yml)
+  ([`.github/workflows/lint.yml`](.github/workflows/lint.yml)) — на каждый
+  push и pull request: `make lint-deps && make lint`, то есть всё, что
+  проверяется локально, и падает, если какая-то проверка пропущена.
+  Проверки отрендеренных манифестов (`helmfile template`, без кластера,
+  [`scripts/check-manifests.sh`](scripts/check-manifests.sh)):
+  - **kubeconform** — каждый объект по схемам Kubernetes 1.36.5 и CRD, в
+    строгом режиме (неизвестное поле — ошибка). Схемы CRD генерируются из
+    тех самых CRD, что ставятся в кластер (Gateway API и Envoy Gateway
+    тоже), — версии схем и CRD не расходятся. Пропускаются только сами
+    объекты CustomResourceDefinition: для них схемы не публикуются.
+  - **trivy config** — ошибки конфигурации: HIGH и CRITICAL во всех
+    релизах, для своих чартов ещё и MEDIUM. Принятые находки (права
+    контроллеров, доступ Cilium и node-exporter к узлу и т. п.) — в
+    [`.trivyignore.yaml`](.trivyignore.yaml), у каждой записано обоснование.
+  - **kube-linter** — все встроенные проверки по своим чартам; отключённые
+    проверки и причины — в [`.kube-linter.yaml`](.kube-linter.yaml),
+    единичные исключения — аннотацией на самом объекте с причиной.
+
+  Версии и sha256 инструментов — в `versions.env`, actions закреплены по
+  SHA коммита, у токена только чтение.
+- [`e2e`](https://github.com/Kurligin/kubeadm-gateway-observability/actions/workflows/e2e.yml)
+  ([`.github/workflows/e2e.yml`](.github/workflows/e2e.yml)) — на push в
+  `main` (и в рабочую ветку `ci-dev`) и вручную: на чистом раннере, как эксперт: `./deploy.sh` (кластер
+  kubeadm на самом раннере) → `make verify` → проверка таймера одобрения
+  сертификатов kubelet → повторный `./deploy.sh`, который ничего не должен
+  изменить (Ansible `changed=0`, helmfile не обновил ни одного релиза,
+  ревизии Helm те же — [`scripts/check-idempotency.sh`](scripts/check-idempotency.sh))
+  → `make verify` ещё раз. При падении поды, события, `describe` и логи
+  неготовых подов, журналы kubelet и containerd собираются в артефакт
+  ([`scripts/collect-diagnostics.sh`](scripts/collect-diagnostics.sh)).
+  Перед развёртыванием workflow освобождает место на диске раннера (из
+  ~14 ГБ свободных kubelet начал бы выселять поды). Проверка «Cilium
+  metrics :9962 closed to the LAN» на раннере пропускается с причиной:
+  `make verify` идёт на самом узле, где порт открыт намеренно.
+  Полный прогон на раннере (2 vCPU / 7 ГБ) — ~12 мин: очистка диска ~3,5
+  мин, `./deploy.sh` ~6,5 мин, `make verify` ~20 с (26 ✓, 1 пропуск),
+  повторный `./deploy.sh` ~1 мин.
 
 ## Особенности
 

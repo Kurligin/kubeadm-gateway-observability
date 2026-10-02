@@ -15,3 +15,6 @@ ca.crt
 
 # Local inventory with real hosts and keys
 ansible/inventory/remote.yml
+
+# Vagrant state (`vagrant up`)
+.vagrant/
