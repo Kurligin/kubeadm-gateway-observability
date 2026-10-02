@@ -6,6 +6,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "logging.labels" . | nindent 4 }}
+  annotations:
+    # Accepted kube-linter findings (`make lint`), see securityContext below.
+    ignore-check.kube-linter.io/run-as-non-root: "reads root-owned container logs (mode 0640) as their owner; all capabilities dropped"
+    ignore-check.kube-linter.io/writable-host-mount: "tail positions and buffer on the node, so no line is lost or sent twice across pod restarts"
 spec:
   selector:
     matchLabels:

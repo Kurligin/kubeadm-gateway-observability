@@ -6,6 +6,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "etcd-metrics-proxy.labels" . | nindent 4 }}
+  annotations:
+    # Accepted kube-linter finding (`make lint`), see hostNetwork below.
+    ignore-check.kube-linter.io/host-network: "etcd serves metrics on the node loopback only; the proxy port requires TLS, a token and RBAC"
 spec:
   selector:
     matchLabels:

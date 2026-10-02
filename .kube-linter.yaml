@@ -1,0 +1,38 @@
+---
+# kube-linter configuration for our own charts (scripts/check-manifests.sh,
+# `make lint`). Every built-in check is on, except the ones below, each
+# excluded for the reason given. Single accepted findings are annotated on
+# the object instead (ignore-check.kube-linter.io/<check>: <reason>).
+checks:
+  addAllBuiltIn: true
+  exclude:
+    # Style of the rendered YAML (Helm keeps the template order), not of the
+    # objects.
+    - sorted-keys
+    # Organisational conventions of the example policy: no owner label or
+    # contact e-mail annotation is used in this project.
+    - required-label-owner
+    - required-annotation-email
+    # Single-node cluster by design: pinning to nodes and three replicas
+    # buy nothing on one node (the demo app runs 2 replicas behind a
+    # PodDisruptionBudget for rolling updates).
+    - no-node-affinity
+    - minimum-three-replicas
+    # Replicas are spread across nodes with topologySpreadConstraints
+    # (ScheduleAnyway), which this check does not recognise.
+    - no-anti-affinity
+    # The cluster DNS defaults (ndots 5) are fine: the pods resolve only
+    # in-cluster names, if any.
+    - dnsconfig-options
+    # Both flag fields that are left at their defaults, which are exactly the
+    # accepted values (restartPolicy Always, strategy RollingUpdate).
+    - restart-policy
+    - no-rolling-update-strategy
+    # The network policies select pods of third-party charts (cert-manager,
+    # Envoy Gateway, kube-prometheus-stack, VictoriaLogs), and the Envoy
+    # Gateway ServiceMonitor selects its Service; those objects are not
+    # part of our charts, so the checks cannot see them. Their effect is
+    # checked on the live cluster by `make verify` (step 8).
+    - dangling-networkpolicy
+    - dangling-networkpolicypeer-podselector
+    - dangling-servicemonitor

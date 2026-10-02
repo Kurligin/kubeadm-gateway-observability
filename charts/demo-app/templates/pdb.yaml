@@ -10,6 +10,9 @@ metadata:
     {{- include "demo-app.labels" $ctx | nindent 4 }}
 spec:
   minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  # A pod that is running but not ready protects nothing: let a node drain
+  # evict it instead of blocking.
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "demo-app.selectorLabels" $ctx | nindent 6 }}

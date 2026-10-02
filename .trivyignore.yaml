@@ -1,0 +1,113 @@
+---
+# Accepted findings of `trivy config` (scripts/check-manifests.sh, `make
+# lint`), each with the reason. Paths are relative to the rendered output:
+# <release>/<chart>/templates/<file>. Gate: HIGH and CRITICAL in every
+# release, also MEDIUM in our own charts.
+misconfigurations:
+  # --- RBAC of controllers whose job needs it ---
+  - id: KSV-0041
+    paths:
+      - "cert-manager/cert-manager/templates/rbac.yaml"
+      - "cert-manager/cert-manager/templates/cainjector-rbac.yaml"
+      - "cilium/cilium/templates/cilium-operator/clusterrole.yaml"
+      - "envoy-gateway/gateway-helm/templates/envoy-gateway-rbac.yaml"
+      - "kube-prometheus-stack/kube-prometheus-stack/templates/prometheus-operator/clusterrole.yaml"
+    statement: >-
+      Secrets are what these controllers manage: cert-manager writes the
+      certificates and keys it issues, cainjector reads CA bundles, the Cilium
+      operator syncs TLS Secrets for its policies, Envoy Gateway reads the
+      Gateway certificate, the Prometheus Operator writes the generated
+      Prometheus and Alertmanager configuration. Upstream RBAC, unchanged.
+  - id: KSV-0114
+    paths:
+      - "cert-manager/cert-manager/templates/cainjector-rbac.yaml"
+      - "envoy-gateway/gateway-helm/templates/certgen-rbac.yaml"
+    statement: >-
+      Both write the CA bundle into webhook configurations (cert-manager
+      cainjector for every annotated webhook, Envoy Gateway certgen for its
+      own); that is their only purpose.
+  - id: KSV-0056
+    paths:
+      - "cert-manager/cert-manager/templates/rbac.yaml"
+      - "envoy-gateway/gateway-helm/templates/infra-manager-rbac.yaml"
+      - "kube-prometheus-stack/kube-prometheus-stack/templates/prometheus-operator/clusterrole.yaml"
+    statement: >-
+      Controllers that create networking objects: Envoy Gateway creates the
+      Service of every Envoy deployment, the Prometheus Operator maintains
+      the kubelet Service and Endpoints, cert-manager creates the solver
+      Service of an ACME HTTP-01 challenge (no ACME issuer is configured here).
+
+  # --- Node agents: host access is their purpose ---
+  - id: KSV-0005
+    paths: ["cilium/**"]
+    statement: Cilium (CNI, eBPF datapath) needs SYS_ADMIN to load BPF programs and mount bpffs/cgroup.
+  - id: KSV-0009
+    paths:
+      - "cilium/**"
+      - "kube-prometheus-stack/kube-prometheus-stack/charts/prometheus-node-exporter/**"
+      - "etcd-metrics-proxy/etcd-metrics-proxy/templates/daemonset.yaml"
+    statement: >-
+      Host network is required: the Cilium agent, its Envoy and its operator
+      run the node network itself; node-exporter reports the node's network
+      statistics; etcd-metrics-proxy reaches etcd metrics on the node loopback
+      (127.0.0.1:2381), and its own port is behind TLS, a token and RBAC.
+  - id: KSV-0010
+    paths: ["kube-prometheus-stack/kube-prometheus-stack/charts/prometheus-node-exporter/**"]
+    statement: node-exporter reads process statistics of the host (host PID namespace), read-only.
+  - id: KSV-0121
+    paths:
+      - "cilium/**"
+      - "kube-prometheus-stack/kube-prometheus-stack/charts/prometheus-node-exporter/**"
+    statement: >-
+      Host /proc, /sys and / are mounted read-only by node-exporter (node
+      metrics) and /proc by Cilium (network namespaces of the pods).
+  - id: KSV-0014
+    paths: ["cilium/**"]
+    statement: >-
+      Cilium agent and its init containers write to the host (CNI binaries,
+      BPF state); the chart offers no read-only root for them or for the
+      Hubble certificate generator.
+  - id: KSV-0017
+    paths: ["cilium/**"]
+    statement: The mount-bpf-fs init container of Cilium mounts bpffs on the host; that needs privileged.
+  - id: KSV-0024
+    paths: ["cilium/**"]
+    statement: Cilium health, metrics and Hubble ports are host ports by design (host network pods).
+  - id: KSV-0119
+    paths: ["cilium/**"]
+    statement: Cilium agent needs NET_RAW for its datapath (raw sockets, ICMP for health checks).
+  - id: KSV-0120
+    paths: ["cilium/**"]
+    statement: Cilium loads kernel modules it needs for the datapath (SYS_MODULE).
+  - id: KSV-0109
+    paths: ["cilium/cilium/templates/cilium-configmap.yaml"]
+    statement: >-
+      False positive: the key names "enable-policy-secrets-sync" and
+      "policy-secrets-namespace" contain the word "secrets"; the ConfigMap
+      holds no secret value.
+
+  # --- Our own charts (MEDIUM gate) ---
+  - id: KSV-0125
+    statement: >-
+      The check's list of trusted registries is generic. Every image here
+      comes from its publisher's registry and is pinned by digest
+      (versions.env; `make lint` fails on an image without a digest).
+  - id: KSV-01010
+    paths: ["demo-app/demo-app/templates/configmap.yaml"]
+    statement: >-
+      False positive: the Angie configuration contains the word "key" in a
+      comment and directives (metric keys); there is no credential in it.
+  - id: KSV-0012
+    paths: ["logging/logging/templates/daemonset.yaml"]
+    statement: >-
+      Fluentd reads the logs of every container from /var/log/pods, files
+      owned by root with mode 0640, so it runs as root and reads them as their
+      owner. Everything else is locked down: all capabilities dropped (no
+      CAP_DAC_OVERRIDE), no privilege escalation, read-only root filesystem.
+  - id: KSV-0023
+    paths: ["logging/logging/templates/daemonset.yaml"]
+    statement: >-
+      Fluentd reads container logs from hostPath /var/log/pods and
+      /var/log/containers (read-only) and keeps
+      its read positions and buffer in hostPath /var/lib/fluentd, so that no
+      log line is lost or sent twice when its pod is replaced.

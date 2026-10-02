@@ -25,6 +25,13 @@ tls:
 apiService:
   insecureSkipTLSVerify: false
 
+# The chart sets a restrictive container securityContext only; the pod
+# level is set too.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
 resources:
   requests:
     cpu: 20m
