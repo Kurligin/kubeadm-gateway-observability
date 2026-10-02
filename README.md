@@ -13,9 +13,10 @@
 local-path-provisioner, вход — Envoy Gateway (Gateway API) с TLS от
 cert-manager, за ним демо-приложение на Angie в двух версиях (canary).
 Метрики собирает Prometheus (kube-prometheus-stack), логи контейнеров —
-Fluentd (не Fluent Bit) в VictoriaLogs; смотреть — Grafana, Prometheus UI и
-vmui через тот же Gateway. Повторный запуск ничего не меняет, `make verify`
-одной командой проверяет всё это сквозными запросами.
+Fluentd (не Fluent Bit) в VictoriaLogs, трейсы запросов через Gateway —
+Envoy (OpenTelemetry) в VictoriaTraces; смотреть — Grafana, Prometheus UI,
+vmui и UI трейсов через тот же Gateway. Повторный запуск ничего не меняет,
+`make verify` одной командой проверяет всё это сквозными запросами.
 
 ## Что уже есть
 
@@ -38,6 +39,7 @@ vmui через тот же Gateway. Повторный запуск ничег�
 | Метрики etcd | чарт `charts/etcd-metrics-proxy` | kube-rbac-proxy: TLS + токен + RBAC перед `127.0.0.1:2381` etcd |
 | Логи | VictoriaLogs + чарт `charts/logging` (Fluentd) | Fluentd DaemonSet читает логи всех контейнеров, добавляет метаданные Kubernetes, шлёт в VictoriaLogs (7 дней, PVC) |
 | Алерты, дашборды, SLO | чарт `charts/observability-extras` | цели Envoy и Envoy Gateway, PrometheusRule, SLO с burn-rate алертами (unit-тесты `promtool test rules`), дашборды «Demo app — golden signals» и «Gateway / SLO», datasource VictoriaLogs |
+| Трейсинг | VictoriaTraces + `telemetry.tracing` в EnvoyProxy (`charts/gateway`) | спан Envoy на каждый запрос (OTLP/gRPC), `trace_id` в access-логах Envoy и Angie, Grafana: трейс ↔ логи; включается сам на узле от 6 ГБ (`TRACING`, см. «Трейсинг») |
 | Доставка алертов | Alertmanager + webhook-получатель в `charts/observability-extras` | каждый алерт — JSON-строкой в лог получателя → Fluentd → VictoriaLogs; Watchdog — сквозная проверка доставки |
 | `kubectl top` | metrics-server | Resource Metrics API; TLS проверяется в обе стороны (сертификаты kubelet подписаны CA кластера) |
 | Образы | `versions.env`, `images.txt` | все образы закреплены `tag@sha256:…`; `make images` — предзагрузка в containerd |
@@ -58,6 +60,12 @@ vmui через тот же Gateway. Повторный запуск ничег�
   | 4 vCPU / 8 ГБ | 3,5 ГБ | 4,3–4,4 ГБ | 2,8–3,3 ГБ | kube-apiserver 0,8, Grafana 0,42–0,58, Prometheus 0,32–0,43, Cilium 0,23–0,42 ГБ |
   | 2 vCPU / 4 ГБ | 3,4–3,5 ГБ | 0,37–0,48 ГБ | 2,8–2,9 ГБ | kube-apiserver 0,82–0,89, Grafana 0,39–0,43, Prometheus 0,36–0,43, Cilium 0,26 ГБ |
 
+  Трейсинг по умолчанию включается только на узле control plane от 6 ГБ,
+  на 4 ГБ — выключен (см. «Трейсинг»); строка 2/4 выше — без него. Сама
+  VictoriaTraces занимает 10–15 МиБ; на 2 vCPU / 4 ГБ с принудительным
+  `TRACING=true` доступно 0,57 ГБ против 0,69 ГБ без него (в разницу
+  входит и рост Prometheus за время замера), `make verify` проходит и так.
+
   Вторая реплика Envoy, metrics-server и получатель алертов вместе
   добавляют ~0,1 ГБ (Envoy ~40 МиБ на реплику, metrics-server 20–30 МиБ,
   получатель ~13 МиБ). На 2 vCPU / 4 ГБ `make verify` проходит, но запас
@@ -75,6 +83,7 @@ vmui через тот же Gateway. Повторный запуск ничег�
   |---|---|
   | метрики Prometheus | 3 ГБ (`retentionSize`) + WAL ~0,5 ГБ |
   | логи в VictoriaLogs | 2 ГБ (`retentionDiskSpaceUsage`) |
+  | трейсы в VictoriaTraces (если включены) | 1 ГБ (`retentionDiskSpaceUsage`), 3 дня |
   | буфер Fluentd | 256 МБ |
   | логи контейнеров на узле | ротация kubelet (10 МБ × 5 файлов на контейнер, старые сжаты), на практике < 0,5 ГБ |
 
@@ -114,6 +123,10 @@ git clone <repo-url> && cd kubeadm-gateway-observability
    auth и admin Grafana). Репозитории чартов загружаются заранее, с
    повторами при сбое сети; первая установка не печатает diff (десятки тысяч строк:
    все манифесты платформы), повторные — печатают только изменения.
+
+Трейсинг ставится, если у узла control plane не меньше 6 ГБ памяти;
+включить или выключить явно — `TRACING=true ./deploy.sh` или
+`TRACING=false ./deploy.sh` (подробнее — «Трейсинг»).
 
 IP узла определяется автоматически (интерфейс маршрута по умолчанию). Если
 интерфейсов несколько — задайте явно: `NODE_IP=10.0.0.5 ./deploy.sh`.
@@ -253,7 +266,7 @@ VirtualBox у нас не было.
 | `make cluster` | только Ansible |
 | `make platform` | только helmfile |
 | `make status` | узел и версии, адрес Gateway, ссылки UI, релизы Helm, краткое здоровье (без паролей) |
-| `make ui` | адреса UI (Grafana, Prometheus, Alertmanager, vmui) и пароли к ним |
+| `make ui` | адреса UI (Grafana, Prometheus, Alertmanager, vmui, трейсы) и пароли к ним |
 | `make ca` | выгрузить корневой сертификат CA в `ca.crt` (для `curl --cacert`) |
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
 | `make add-worker WORKER=<адрес>` | присоединить воркер по SSH (см. «Несколько узлов») |
@@ -271,7 +284,8 @@ make verify        # на узле: адрес, CA и пароль берутс�
 ```
 
 Скрипт `scripts/verify.sh` проходит те же 8 шагов, что описаны ниже для
-ручной проверки (и шаг 9, если в кластере есть воркеры), и печатает строку на каждую проверку: `✓` — прошла, `✗` —
+ручной проверки (шаг 9 — если в кластере есть воркеры, шаг 10 — если
+включён трейсинг), и печатает строку на каждую проверку: `✓` — прошла, `✗` —
 нет (с причиной), `-` — пропущена (с причиной). В конце — итог и код
 возврата: `0`, если провалов нет, иначе `1`. Сразу после деплоя не всё
 готово мгновенно (цели Prometheus появляются через 1–2 интервала сбора),
@@ -288,6 +302,7 @@ make verify        # на узле: адрес, CA и пароль берутс�
 | 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API); поддельный `X-Gateway-Route` клиента до Angie не дошёл (заменён фильтром маршрута); копия этого же запроса (зеркало) пришла в web-v2 на теневой порт (`traffic: shadow`) |
 | 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A` (metrics-server); алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
 | 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway не проходят (404); etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для локальной сети (проверяется только с другой машины) |
+| 10 | только при включённом трейсинге (иначе одна строка «пропущено» с причиной): запрос со сгенерированным `traceparent` (W3C) через Gateway → трейс с этим ID в VictoriaTraces (Jaeger API через `traces.demo.local`) за ≤ 60 с, в нём спан Envoy с маршрутом приложения (`gateway.route`) и версией ответившего бэкенда (`backend.version`); этот `trace_id` есть в access-логе Angie в VictoriaLogs; Grafana: datasource трейсов отдаёт этот трейс, ссылки лог → трейс и трейс → логи настроены |
 | 9 | только при нескольких узлах (на одном — одна строка «пропущено»): поды всех DaemonSet готовы на каждом узле (Cilium, Fluentd, node-exporter — на всех); Envoy и web-v1/web-v2 работают больше чем на одном узле; Gateway отвечает 200 по адресу каждого узла; `kubectl logs` пода на воркере и `kubectl top` воркера; логи подов воркера есть в VictoriaLogs; node-exporter и kubelet каждого узла `up` в Prometheus |
 
 Повторный запуск в течение минуты корректен: rate limit `/limited`
@@ -458,6 +473,7 @@ for i in $(seq 10); do c -o /dev/null https://app.demo.local/broken; done; sleep
 | Prometheus | `https://prometheus.demo.local` | basic auth Gateway: `admin` / пароль из Secret `gateway/ui-basic-auth` | `GET`, `HEAD`, `POST /api/v1/*` (запросы) |
 | Alertmanager | `https://alertmanager.demo.local` | тот же basic auth | `GET`, `HEAD`, создание и удаление silence |
 | vmui (VictoriaLogs) | `https://logs.demo.local/select/vmui/` | тот же basic auth | только `/select/*` (vmui и LogsQL API) |
+| UI трейсов (VictoriaTraces, если включён трейсинг) | `https://traces.demo.local/select/vmui/` | тот же basic auth | только `/select/*` (UI, Jaeger API, LogsQL API) |
 
 У Prometheus, Alertmanager и VictoriaLogs своей аутентификации нет, поэтому
 наружу открыто только чтение: служебные `POST /-/reload`, `/-/quit` и
@@ -476,7 +492,7 @@ kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | bas
 ```
 
 Чтобы открыть UI в браузере с другой машины, добавьте в её `/etc/hosts`
-строку `<IP узла> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local`
+строку `<IP узла> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local`
 и импортируйте `ca.crt` (или согласитесь с предупреждением браузера). Для
 curl хватает `--resolve`, как выше.
 
@@ -502,6 +518,7 @@ kube-state-metrics. Цели описаны ServiceMonitor/PodMonitor рядом
 | `cert-manager`, `cainjector`, `webhook` | выпуск сертификатов |
 | `fluentd` | Fluentd: прочитанные записи по namespace пода (метка `kube_namespace`: `namespace` у цели уже занят — это namespace самого Fluentd), буфер, ретраи, ошибки вывода |
 | `victoria-logs` | хранилище логов: приём, запросы, диск |
+| `victoria-traces` (если включён трейсинг) | хранилище трейсов: принятые спаны (`vt_rows_ingested_total{type="opentelemetry_traces_otlpgrpc"}`), запросы, диск; со стороны Envoy — кластер `tracing` в его метриках (`envoy_cluster_upstream_rq_total{envoy_cluster_name="tracing"}`) |
 | `kube-prometheus-stack-*` | сам Prometheus, Alertmanager, Grafana, оператор |
 
 Проверка, что цели доступны (все `up`):
@@ -570,6 +587,7 @@ VictoriaLogs. Источник данных VictoriaLogs — плагин
 | `FluentdNoOutput` | Fluentd читает логи, а VictoriaLogs 5 мин не принимает ни одной строки (`vl_rows_ingested_total` не растёт или VictoriaLogs недоступна) — судим по принимающей стороне: счётчик записей Fluentd растёт и на неудачных попытках |
 | `FluentdBufferErrors`, `FluentdBufferAlmostFull` | ретраи/ошибки отправки за 10 мин; буфер заполнен больше чем на 80 % |
 | `EtcdMetricsMissing` | метрики etcd (через прокси) не собираются 5 мин |
+| `TracingNoSpans` (если включён трейсинг) | приложение получает запросы через Gateway, а VictoriaTraces 5 мин не принимает ни одного спана или недоступна — по аналогии с `FluentdNoOutput`, судим по принимающей стороне; 4 сценария `promtool test rules` в `tests/prometheus/tracing.test.yaml` |
 | `AppAvailabilityBudgetBurnFast` / `…Slow` | SLO 99,9 % ответов без 5xx (30 дней): бюджет ошибок тратится в 14,4× быстрее за 1 ч и 5 мин или в 6× за 6 ч и 30 мин (critical); в 3× за 1 д и 2 ч или в 1× за 3 д и 6 ч (warning) — схема multi-window multi-burn-rate из Google SRE Workbook |
 | `AppLatencyBudgetBurnFast` / `…Slow` | SLO 99 % запросов быстрее 250 мс (время ответа приложения по гистограмме Envoy), те же окна и пороги |
 
@@ -690,6 +708,140 @@ $L https://logs.demo.local/select/logsql/query --data-urlencode "query=x_request
 
 В Grafana те же логи — Explore → источник VictoriaLogs или нижние панели
 дашборда «Demo app — golden signals».
+
+### Трейсинг (шаг 10)
+
+**Зачем.** Метрики говорят «стало медленно», логи — что было в одном
+месте; трейс связывает запрос целиком: что сделал Gateway (какой маршрут,
+сколько ждал бэкенд, ушла ли копия в зеркало) и какой бэкенд ответил, — и
+по `trace_id` ведёт к строкам логов Envoy и Angie этого запроса.
+
+**Как устроено.**
+
+```mermaid
+flowchart LR
+  C[клиент<br/>traceparent или без него] --> E[Envoy Gateway<br/>спан ingress + egress<br/>sampling 100 %]
+  E -->|traceparent<br/>тот же trace ID| A[Angie web-v1/v2<br/>trace_id в JSON access-логе]
+  E -->|OTLP/gRPC :4317<br/>раз в 5 с| T[(VictoriaTraces<br/>3 дня, ≤ 1 ГБ)]
+  E -->|access-лог: trace_id| F[Fluentd] --> L[(VictoriaLogs)]
+  A --> F
+  G[Grafana] -->|Jaeger API| T
+  G -->|LogsQL| L
+```
+
+- **Источник спанов — Envoy** (`EnvoyProxy.spec.telemetry.tracing`,
+  провайдер OpenTelemetry): на каждый запрос спан `ingress` (сервер) и
+  спан к бэкенду `router … egress` (и `mirror` для теневой копии). Входящий
+  W3C `traceparent` продолжается (тот же trace ID), без него Envoy начинает
+  новый трейс; бэкенду уходит `traceparent` со спаном Envoy как родителем.
+  Теги: `gateway.route` (маршрут Envoy, `httproute/gateway/app/rule/2/…`),
+  `gateway.rule` (имя правила: `weighted`, `path-v2`, …), `backend.version`
+  (из заголовка ответа Angie `X-App-Version`), плюс штатные `http.url`,
+  `http.status_code`, `upstream_address`, `guid:x-request-id`. Sampling
+  100 %: трафика в демо мало, и `make verify` должен найти свой запрос; под
+  реальной нагрузкой разумно 1–10 % (`tracing.samplingRate` в
+  `charts/gateway/values.yaml`).
+- **Без OTel Collector.** Envoy отправляет спаны пачками сам (буфер, сброс
+  раз в 5 с), хвостовая выборка (tail sampling) при 100 % не нужна, а
+  Collector — это ещё ~100 МБ памяти и ещё один компонент. Envoy пишет
+  прямо в VictoriaTraces по OTLP/gRPC (Service с `appProtocol: grpc` — иначе
+  Envoy Gateway говорил бы с ним по HTTP/1.1). Внутри кластера gRPC без TLS,
+  как Fluentd → VictoriaLogs; принимать спаны NetworkPolicy разрешает
+  только Envoy-прокси.
+- **Angie** своих спанов не создаёт: в образе `angie:*-minimal` нет
+  динамических модулей (модуль OpenTelemetry — отдельный пакет, с ним
+  пришлось бы брать другой образ). Он берёт trace ID из `traceparent`
+  (`map` по регулярному выражению W3C) и пишет его в JSON access-лог полем
+  `trace_id`; то же поле (`%TRACE_ID%`) — в access-логе Envoy. Так лог и
+  трейс связаны честно, без «рисованных» спанов приложения.
+- **Хранилище — VictoriaTraces** (single node, Deployment с PVC local-path
+  на control plane, namespace `tracing`, Pod Security `restricted`). Почему
+  оно, а не Tempo или Jaeger:
+
+  | | VictoriaTraces 0.11.1 | Grafana Tempo (single binary) | Jaeger v2 (на базе OTel Collector) |
+  |---|---|---|---|
+  | память на одном узле | ~10–30 МиБ на демо-трафике (у нас); по данным разработчиков в 3,7× меньше Tempo | сотни МиБ (ingester, блоки в памяти) | ~100+ МиБ (Collector + Badger) |
+  | приём | OTLP gRPC и HTTP | OTLP, Jaeger, Zipkin | OTLP, Jaeger, Zipkin |
+  | Grafana | встроенный datasource Jaeger (Jaeger query API), трейс ↔ логи с VictoriaLogs | свой datasource (TraceQL) | встроенный datasource Jaeger |
+  | стиль платформы | та же экосистема и тот же движок хранения, что у VictoriaLogs: флаги, метрики, ретеншн по диску, vmui | отдельная экосистема | отдельная экосистема |
+  | зрелость | молодой проект (с 2025, версия 0.x) | зрелый (3.x) | зрелый (2.x) |
+  | лицензия | Apache 2.0 | AGPL 3.0 | Apache 2.0 |
+
+  Решили память на 8-гигабайтном узле и единый стиль с VictoriaLogs;
+  молодость VictoriaTraces компенсирована тем, что Grafana с ним работает
+  через стабильный Jaeger API, а не через собственный плагин. Хранение 3
+  дня, не больше 1 ГБ на диске (PVC 2 ГиБ). Метрики — ServiceMonitor, алерт
+  `TracingNoSpans` (см. «Мониторинг»).
+- **Grafana**: источник `Traces` (тип Jaeger, `…/select/jaeger`); у спана
+  кнопка «Related logs» открывает в VictoriaLogs записи с тем же
+  `trace_id:="<id>"` (Envoy и Angie, `tracesToLogsV2`); у записи лога с
+  полем `trace_id` в VictoriaLogs — ссылка «View trace» (derived field
+  плагина VictoriaLogs). На дашборде «Demo app — golden signals» — панель
+  «Traced requests» (access-лог Angie с `trace_id`) и ссылка «Traces
+  (Explore)» вверху.
+
+**Включение и выключение.** Переменная `TRACING` (окружение `./deploy.sh`
+/ `make deploy` / `make platform`):
+
+| `TRACING` | что будет |
+|---|---|
+| `auto` (по умолчанию) | включён, если у узла control plane не меньше 5632 МиБ памяти (так ядро показывает ВМ на 6 ГБ; ВМ на 8 ГБ — ~7,9 ГиБ, на 4 ГБ — ~3,8 ГиБ). Решение — по памяти control plane: VictoriaTraces живёт там (её том привязан к узлу) |
+| `true` | включён всегда (например, на 4 ГБ: доступной памяти остаётся ~0,57 ГБ вместо ~0,69, проверено) |
+| `false` | выключен; если был включён — всё удаляется |
+
+`make platform` печатает решение (`==> tracing: on (TRACING=auto, control
+plane memory 7941 MiB >= 5632 MiB)`), `make status` — что развёрнуто
+сейчас. Выключение удаляет релиз VictoriaTraces (вместе с томом и
+данными), namespace `tracing`, его NetworkPolicy, маршрут
+`traces.demo.local`, источник `Traces` в Grafana (у него `prune: true`) и
+блок `tracing` в EnvoyProxy (без перезапуска подов Envoy: это xDS); поле
+`trace_id` в access-логах при этом пустое (VictoriaLogs пустые поля не
+хранит). Проверить, что ничего не осталось:
+
+```bash
+TRACING=false make platform
+kubectl get ns tracing                     # NotFound
+kubectl get pv | grep tracing              # пусто
+kubectl -n envoy-gateway-system get envoyproxy node-lb -o jsonpath='{.spec.telemetry.tracing}'   # пусто
+make verify                                # шаг 10: «- Tracing  tracing is off (…)»
+TRACING=true make platform                 # обратно; повтор — без изменений
+```
+
+Без кластера (`make lint`, `make images-list`) рендер всегда с трейсингом —
+его манифесты тоже проверяются; если кластер в kubeconfig есть, но
+прочитать узел нельзя, `TRACING=auto` останавливает развёртывание, а не
+угадывает.
+
+**Как найти трейс своего запроса** (на узле, `c` и `ca.crt` — как в
+разделе «Gateway и приложение»):
+
+```bash
+TID=$(openssl rand -hex 16)
+c -H "traceparent: 00-$TID-$(openssl rand -hex 8)-01" https://app.demo.local/
+sleep 15            # Envoy сбрасывает спаны раз в 5 с, VictoriaTraces прячет последние 10 с
+T="curl -s --resolve traces.demo.local:443:$IP --cacert ca.crt -u admin:<пароль>"
+$T https://traces.demo.local/select/jaeger/api/traces/$TID \
+  | jq -c '.data[0].spans[] | {op: .operationName, tags: [.tags[] | select(.key | test("gateway|backend|status")) | "\(.key)=\(.value)"]}'
+# {"op":"ingress","tags":["gateway.route=httproute/gateway/app/rule/2/match/0/app_demo_local","gateway.rule=weighted","backend.version=v1","http.status_code=200"]}
+# {"op":"router httproute/gateway/app/rule/2 egress", ...}
+# тот же запрос в логах (Envoy и Angie):
+$L https://logs.demo.local/select/logsql/query --data-urlencode "query=trace_id:=\"$TID\"" \
+  | jq -c '{c: ."kubernetes.container_name", trace_id, version, traffic}'
+```
+
+Запрос без `traceparent` тоже трассируется: его trace ID — в поле
+`trace_id` access-логов (найти запрос по `X-Request-ID` в VictoriaLogs →
+взять `trace_id` → «View trace»). В Grafana: Explore → `Traces` → вкладка
+TraceID (ввести ID) или Search (сервис `envoy-gateway`).
+
+**Свой `X-Request-ID` — только UUID.** Envoy принимает решение о
+трассировке по `X-Request-ID`: признак «трассировать» упакован в UUID, и
+запрос с произвольным ID (например, `verify-…` шага 6 или `check-…` из
+раздела «Логи») Envoy не трассирует вовсе — даже с `traceparent`. Запрос
+без своего ID (Envoy создаёт UUID сам) или с UUID трассируется. Отключить
+это в Envoy Gateway 1.9 можно только патчем xDS (EnvoyPatchPolicy) — не
+делали. Чтобы ссылки не вели в пустоту, Angie пишет `trace_id` только для
+трейсов с флагом sampled; в access-логе Envoy поле есть всегда.
 
 ### Безопасность (шаг 8)
 
@@ -912,7 +1064,9 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   `make verify` идёт на самом узле, где порт открыт намеренно.
   Полный прогон на раннере (2 vCPU / 7 ГБ) — ~12 мин: очистка диска ~3,5
   мин, `./deploy.sh` ~6,5 мин, `make verify` ~20 с (26 ✓, 1 пропуск),
-  повторный `./deploy.sh` ~1 мин.
+  повторный `./deploy.sh` ~1 мин — замер до трейсинга; на раннере с 7 ГБ
+  `TRACING=auto` его включает, это ещё релиз VictoriaTraces и 3 проверки
+  шага 10.
 
 ## Особенности
 
@@ -976,8 +1130,8 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   снимает таблицу.
 - **Pod Security по namespaces.** `restricted` — `demo`, `gateway`,
   `envoy-gateway-system`, `cert-manager`, `monitoring` (Prometheus,
-  Alertmanager, Grafana, оператор, kube-state-metrics) и `logging`
-  (VictoriaLogs). Компонентам уровня узла нужен хост, а это запрещает даже
+  Alertmanager, Grafana, оператор, kube-state-metrics), `logging`
+  (VictoriaLogs) и `tracing` (VictoriaTraces, если трейсинг включён). Компонентам уровня узла нужен хост, а это запрещает даже
   `baseline`, поэтому они вынесены в отдельные namespaces с `privileged`:
   `monitoring-node` — node-exporter (host network/PID, только чтение `/`,
   `/proc`, `/sys`) и прокси etcd (host network); `logging-node` — Fluentd
@@ -999,7 +1153,7 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
 - **Сетевые политики.** Cilium применяет стандартные NetworkPolicy. Во всех
   наших namespaces (`demo`, `gateway`, `envoy-gateway-system`,
   `cert-manager`, `local-path-storage`, `monitoring`, `monitoring-node`,
-  `logging`, `logging-node`) входящий трафик запрещён по умолчанию
+  `logging`, `logging-node`, `tracing`) входящий трафик запрещён по умолчанию
   (`default-deny-ingress`), разрешено только:
 
   | Куда | Откуда |
@@ -1010,6 +1164,8 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   | Prometheus 9090, Alertmanager 9093 | Grafana, Envoy-прокси (UI) |
   | Grafana 3000 | Envoy-прокси (UI) |
   | VictoriaLogs 9428 | Fluentd (запись), Grafana и Envoy-прокси (чтение), Prometheus |
+  | VictoriaTraces 4317 (OTLP/gRPC, запись) | только Envoy-прокси |
+  | VictoriaTraces 10428 (запросы, UI, метрики) | Grafana, Envoy-прокси (UI), Prometheus |
   | Envoy-прокси 10080/10443 (Gateway 80/443) | откуда угодно |
   | вебхуки cert-manager (10250) и Envoy Gateway (9443) | API-сервер (порт открыт для всех: вебхук — это TLS, принимает только AdmissionReview) |
   | внутри `envoy-gateway-system` | прокси ↔ контроллер (xDS) |
@@ -1169,6 +1325,13 @@ UDP 8472 между узлами); `make destroy` на control plane ворке�
   дежурств нет. SLO-бюджет за 30 дней оценивается по темпу последних 3 дней:
   Prometheus хранит 3 дня метрик.
 - **Исходящий трафик подов не ограничен** (политики только на входящий).
+- **Трейс — это Gateway.** Спаны создаёт только Envoy; у Angie своих спанов
+  нет (образ minimal без модуля OpenTelemetry), он связан с трейсом через
+  `trace_id` в логе. VictoriaTraces — версия 0.x (молодой проект); Grafana
+  работает с ним через стабильный Jaeger API. Sampling 100 % — под
+  демо-нагрузку, не под продакшен. На узле control plane меньше 6 ГБ
+  трейсинг по умолчанию выключен. Запросы с собственным `X-Request-ID` не
+  в формате UUID Envoy не трассирует (см. «Трейсинг»).
 - **Сеть при развёртывании.** Короткие сбои сети (репозитории чартов,
   реестры образов) переживаются повторами, но долгий обрыв прерывает
   развёртывание — тогда достаточно запустить `./deploy.sh` ещё раз.
