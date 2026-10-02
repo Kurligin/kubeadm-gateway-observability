@@ -7,8 +7,8 @@
 # `check` takes the full output of the repeated `./deploy.sh` (or `make
 # deploy`) and fails unless:
 #   - every host in the Ansible PLAY RECAP has changed=0 and failed=0;
-#   - helmfile upgraded no release (no "UPDATED RELEASES" in its output) and
-#     did not have to retry;
+#   - helmfile upgraded or deleted no release (no "Updated Releases" table
+#     in its output) and did not have to retry;
 #   - no Helm release got a new revision since `snapshot` (helm list -A).
 # Used by the e2e workflow (.github/workflows/e2e.yml); works on any node.
 set -euo pipefail
@@ -48,9 +48,12 @@ check_ansible() {
 check_helmfile() {
   local clean
   clean="$(sed -E 's/\x1b\[[0-9;]*m//g' "$1")"
-  if grep -q '^UPDATED RELEASES' <<<"${clean}"; then
-    fail "helmfile: releases were upgraded"
-    sed -n '/^UPDATED RELEASES/,/^$/p' <<<"${clean}" | sed 's/^/    /'
+  # helmfile 1.x: "==== Updated Releases ====" (or "Deleted Releases")
+  # followed by a table; older versions print "UPDATED RELEASES:".
+  local summary='(=+ (Updated|Deleted) Releases =+|^(UPDATED|DELETED) RELEASES)'
+  if grep -Eq "${summary}" <<<"${clean}"; then
+    fail "helmfile: releases were upgraded or deleted"
+    sed -En "/${summary}/,/^[[:space:]]*$/p" <<<"${clean}" | sed 's/^/    /'
   elif grep -q 'helmfile failed; retrying' <<<"${clean}"; then
     fail "helmfile: had to retry (see $1)"
   else
