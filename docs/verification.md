@@ -3,7 +3,9 @@
 Полная версия раздела «Проверка» [README](../README.md): что делает
 `make verify`, как проверить каждый шаг руками и как увидеть алерты в
 действии. Все команды работают в bash и zsh (Linux, macOS), нужны `curl` и
-`jq` (для трейсов ещё `openssl`).
+`jq` (для трейсов ещё `openssl`). Блоки команд можно копировать целиком, в
+том числе в zsh macOS по умолчанию: комментариев внутри блоков нет,
+ожидаемый вывод — отдельным блоком `text`.
 
 - [Одной командой: `make verify`](#одной-командой-make-verify)
 - [Переменные](#переменные)
@@ -17,8 +19,10 @@
 
 ## Одной командой: `make verify`
 
+На узле (адрес, CA и пароли берутся из кластера):
+
 ```bash
-make verify        # на узле: адрес, CA и пароли берутся из кластера
+make verify
 ```
 
 Скрипт [`scripts/verify.sh`](../scripts/verify.sh) печатает строку на каждую
@@ -27,7 +31,7 @@ make verify        # на узле: адрес, CA и пароли берутс�
 Сразу после деплоя не всё готово мгновенно (цели Prometheus появляются через
 1–2 интервала сбора), поэтому такие проверки повторяются до 5 минут
 (`WAIT=<секунды>`), запись в логах ищется до 45 с, трейс — до 60 с, алерт
-Watchdog — до 240 с. Прогон занимает ~45 с.
+Watchdog — до 240 с. Прогон занимает 45–90 с (на двух узлах дольше).
 
 | Шаг | Что проверяется |
 |---|---|
@@ -55,7 +59,12 @@ Watchdog — до 240 с. Прогон занимает ~45 с.
 
 ```bash
 GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh
-# Passed: 23, failed: 0, skipped: 8 — на стенде с двумя узлами
+```
+
+Итог на стенде с двумя узлами:
+
+```text
+Passed: 23, failed: 0, skipped: 8
 ```
 
 **Повторный запуск в течение минуты** корректен: rate limit `/limited`
@@ -75,10 +84,11 @@ Prometheus Operator может пересоздать под Prometheus дваж
 
 Задайте один раз в той же сессии терминала; команды ниже на них опираются.
 
-**На узле** (из каталога репозитория):
+**На узле** (из каталога репозитория; `make ca` пишет `./ca.crt` — корень
+демо-CA):
 
 ```bash
-make ca                                   # пишет ./ca.crt — корень демо-CA
+make ca
 IP=$(kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].value}')
 PASS=$(kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | base64 -d)
 ```
@@ -93,29 +103,50 @@ PASS=$(ssh ubuntu@$IP 'kubectl -n gateway get secret ui-basic-auth -o jsonpath={
 ```
 
 **Дальше везде** — функция `gwcurl`: curl к Gateway с проверкой сертификата
-по `ca.crt`, без DNS (`--resolve` подставляет IP для имён `*.demo.local`) и
-мимо HTTP-прокси, если он задан в окружении:
+по `ca.crt`, без DNS (`--resolve` подставляет IP для всех имён
+`*.demo.local`: приложение, Grafana, Prometheus, Alertmanager, логи, трейсы)
+и мимо HTTP-прокси, если он задан в окружении:
 
 ```bash
 gwcurl() {
   curl -sS --noproxy '*' --cacert ca.crt \
-    --resolve "app.demo.local:443:$IP" --resolve "prometheus.demo.local:443:$IP" \
+    --resolve "app.demo.local:443:$IP" --resolve "grafana.demo.local:443:$IP" \
+    --resolve "prometheus.demo.local:443:$IP" --resolve "alertmanager.demo.local:443:$IP" \
     --resolve "logs.demo.local:443:$IP" --resolve "traces.demo.local:443:$IP" "$@"
 }
+```
+
+Например, Grafana и Alertmanager (`$PASS` — пароль basic auth):
+
+```bash
+gwcurl https://grafana.demo.local/api/health
+gwcurl -u "admin:$PASS" https://alertmanager.demo.local/api/v2/status | jq -r .versionInfo.version
+```
+
+```text
+{
+  "database": "ok",
+  "version": "13.2.3",
+  …
+}
+0.34.1
 ```
 
 ## Шаги вручную
 
 ### 1. Кластер
 
-На узле:
+На узле: узлы `Ready` (v1.36.5, Ubuntu 24.04.5 LTS, containerd://2.3.6),
+все поды `Running` и `READY n/n` (или `Completed` у Job), все релизы Helm
+`deployed`, StorageClass `local-path (default)`; `make status` — сводка:
+узлы, адрес Gateway, трейсинг, релизы, здоровье.
 
 ```bash
-kubectl get nodes -o wide          # Ready, v1.36.5, Ubuntu 24.04.5 LTS, containerd://2.3.6
-kubectl get pods -A                # все Running и READY n/n (или Completed у Job)
-helm list -A                       # все STATUS deployed
-kubectl get storageclass           # local-path (default)
-make status                        # сводка: узлы, адрес Gateway, трейсинг, релизы, здоровье
+kubectl get nodes -o wide
+kubectl get pods -A
+helm list -A
+kubectl get storageclass
+make status
 ```
 
 Повторный `./deploy.sh` должен завершиться с `changed=0` в итоге Ansible и
@@ -125,43 +156,61 @@ make status                        # сводка: узлы, адрес Gateway,
 
 ### 2. Gateway
 
-На узле:
+На узле (у Gateway `public` — `PROGRAMMED True` и `ADDRESS` = IP узла):
 
 ```bash
 kubectl get gatewayclass,gateway,httproute,referencegrant -A
 kubectl get envoyproxy,clienttrafficpolicy,backendtrafficpolicy,securitypolicy -A
-kubectl -n gateway get gateway public      # PROGRAMMED True, ADDRESS = IP узла
+kubectl -n gateway get gateway public
 kubectl -n gateway get httproute app -o jsonpath='{.spec.rules[*].timeouts}'; echo
-# {"request":"10s"} {"request":"10s"} {"request":"10s"}
+```
+
+```text
+{"request":"10s"} {"request":"10s"} {"request":"10s"}
 ```
 
 ### 3–5. Приложение через Gateway
 
+Редирект HTTP → HTTPS и ответ приложения:
+
 ```bash
 curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: app.demo.local' http://$IP/
-# 301 https://app.demo.local/
 gwcurl https://app.demo.local/
-# Hello World! version=v1 pod=web-v1-…
 ```
 
-Canary и маршрутизация по пути и заголовку:
+```text
+301 https://app.demo.local/
+Hello World! version=v1 pod=web-v1-…
+```
+
+Canary и маршрутизация по пути и заголовку: на 100 запросах около 90 v1 и
+10 v2, `/v2` и заголовок `X-Canary: true` — всегда v2:
 
 ```bash
 for i in $(seq 100); do gwcurl https://app.demo.local/; done | awk '{print $3}' | sort | uniq -c
-#   ~90 version=v1
-#   ~10 version=v2
-gwcurl https://app.demo.local/v2                       # всегда version=v2
-gwcurl -H 'X-Canary: true' https://app.demo.local/     # всегда version=v2
+gwcurl https://app.demo.local/v2
+gwcurl -H 'X-Canary: true' https://app.demo.local/
+```
+
+```text
+  90 version=v1
+  10 version=v2
+Hello World! version=v2 pod=web-v2-…
+Hello World! version=v2 pod=web-v2-…
 ```
 
 Заголовки (стандартные фильтры `ResponseHeaderModifier` /
-`RequestHeaderModifier`):
+`RequestHeaderModifier`): правило маршрута видно в `x-gateway-route`, а
+`x-backend-pod` и `server` убраны:
 
 ```bash
 gwcurl -I https://app.demo.local/ | grep -iE 'x-gateway-route|x-backend-pod|^server'
-# x-gateway-route: weighted        (x-backend-pod и server убраны)
 gwcurl -I https://app.demo.local/v2 | grep -i x-gateway-route
-# x-gateway-route: path-v2
+```
+
+```text
+x-gateway-route: weighted
+x-gateway-route: path-v2
 ```
 
 Rate limit: путь `/limited` — 10 запросов в минуту на каждую из двух реплик
@@ -170,28 +219,49 @@ Envoy, дальше 429. Один curl с несколькими URL держи�
 
 ```bash
 gwcurl -o /dev/null -w '%{http_code}\n' 'https://app.demo.local/limited?n=[1-15]' | sort | uniq -c
-#   10 200
-#    5 429
+```
+
+```text
+  10 200
+   5 429
 ```
 
 Отказ по запросу: `/broken` всегда отвечает 502 и пишет `[error]` в error-лог
-Angie — так проверяются error-логи и алерт на 5xx:
+Angie — так проверяются error-логи и алерт на 5xx. Для графиков и PromQL —
+10 запросов и 60 с ожидания (сбор раз в 30 с):
 
 ```bash
-gwcurl -o /dev/null -w '%{http_code}\n' https://app.demo.local/broken     # 502
-# для графиков и PromQL: 10 запросов и подождать 60 с (сбор раз в 30 с)
+gwcurl -o /dev/null -w '%{http_code}\n' https://app.demo.local/broken
 for i in $(seq 10); do gwcurl -o /dev/null https://app.demo.local/broken; done; sleep 60
 ```
 
+```text
+502
+```
+
+Первая же пачка видна в доле 5xx (панель «5xx share» и запрос ниже), даже
+сразу после перезапуска Envoy: счётчики ответов Envoy создаёт лениво, с
+первым запросом (или первым 5xx) серия появляется уже не с нуля, и
+`rate()`/`increase()` по ней первую пачку не видят. Поэтому дашборды,
+алерты и SLO считают по копиям `envoy_app:upstream_rq_total:filled` и
+`envoy_app:upstream_rq_5xx_total:filled` (recording rules), которые
+начинаются с нуля вместе с кластером Envoy. После перезапуска Envoy
+подождите около минуты перед пачкой: эти копии появляются с первым сбором
+метрик нового пода.
+
 Зеркало и перезапись заголовка запроса (на узле: смотрим логи подов
-напрямую):
+напрямую). Первая запись — ответ клиенту, вторая — копия зеркала, ответ
+которой отброшен:
 
 ```bash
 gwcurl -H 'X-Gateway-Route: forged' -H 'X-Request-ID: mirror-check-1' https://app.demo.local/
 kubectl -n demo logs -l app.kubernetes.io/name=demo-app --tail=-1 | grep mirror-check-1 \
   | jq -c '{gateway_route, traffic, version}'
-# {"gateway_route":"weighted","traffic":"app","version":"v1"}      — ответ клиенту
-# {"gateway_route":"weighted","traffic":"shadow","version":"v2"}   — зеркало, ответ отброшен
+```
+
+```text
+{"gateway_route":"weighted","traffic":"app","version":"v1"}
+{"gateway_route":"weighted","traffic":"shadow","version":"v2"}
 ```
 
 Метрики приложения напрямую (на узле; порт 9113 доступен только внутри
@@ -216,9 +286,14 @@ sleep 15
 gwcurl -u "admin:$PASS" https://logs.demo.local/select/logsql/query \
   --data-urlencode "query=x_request_id:\"$RID\"" \
   | jq -c '{_time, container: ."kubernetes.container_name", traffic, status, uri}'
-# {"_time":"…","container":"angie","traffic":"app","status":"200","uri":"/"}
-# {"_time":"…","container":"angie","traffic":"shadow","status":"200","uri":"/"}   — копия зеркала
-# {"_time":"…","container":"envoy","traffic":null,"status":"200","uri":"/"}
+```
+
+Три записи: Angie, Angie (`traffic: shadow` — копия зеркала) и Envoy:
+
+```text
+{"_time":"…","container":"angie","traffic":"app","status":"200","uri":"/"}
+{"_time":"…","container":"angie","traffic":"shadow","status":"200","uri":"/"}
+{"_time":"…","container":"envoy","traffic":null,"status":"200","uri":"/"}
 ```
 
 Ещё запросы LogsQL (vmui `https://logs.demo.local/select/vmui/` или тот же
@@ -244,10 +319,13 @@ _time:15m kubernetes.container_name:receiver alertname:Watchdog   # достав
 ```bash
 gwcurl -u "admin:$PASS" https://prometheus.demo.local/api/v1/targets \
   | jq -r '.data.activeTargets[] | .health + " " + .labels.job' | sort | uniq -c
-#    1 up apiserver
-#    2 up envoy
-#    1 up etcd-metrics
-#    …
+```
+
+```text
+   1 up apiserver
+   2 up envoy
+   1 up etcd-metrics
+   …
 ```
 
 Запрос PromQL через API:
@@ -256,9 +334,27 @@ gwcurl -u "admin:$PASS" https://prometheus.demo.local/api/v1/targets \
 gwcurl -u "admin:$PASS" -G https://prometheus.demo.local/api/v1/query \
   --data-urlencode 'query=sum by (version) (angie_http_server_zones_requests_total{zone="app"})' \
   | jq -c '.data.result[] | {version: .metric.version, requests: .value[1]}'
-# {"version":"v1","requests":"977"}
-# {"version":"v2","requests":"119"}
 ```
+
+```text
+{"version":"v1","requests":"977"}
+{"version":"v2","requests":"119"}
+```
+
+Доля 5xx за 10 минут — после пачки к `/broken` выше:
+
+```bash
+gwcurl -u "admin:$PASS" -G https://prometheus.demo.local/api/v1/query \
+  --data-urlencode 'query=sum(increase(envoy_app:upstream_rq_5xx_total:filled[10m])) / sum(increase(envoy_app:upstream_rq_total:filled[10m]))' \
+  | jq -r '.data.result[0].value[1]'
+```
+
+```text
+0.0807…
+```
+
+Число зависит от остального трафика за 10 минут (здесь — после всех
+запросов выше); если, кроме пачки к `/broken`, запросов не было, это `1`.
 
 Ещё запросы (в UI Prometheus, Grafana → Explore или тем же API):
 
@@ -272,9 +368,9 @@ sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/
 sum by (version) (rate(angie_http_server_zones_requests_total{namespace="demo", zone="app"}[5m]))
 # p95 времени ответа приложения, мс (гистограмма Envoy)
 histogram_quantile(0.95, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"}[5m])))
-# доля 5xx за 10 мин (серия появляется с первым ответом 5xx, например после 10 запросов к /broken)
-sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+", envoy_response_code_class="5"}[10m]))
-  / sum(increase(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"}[10m]))
+# доля 5xx за 10 мин; счётчики envoy_app:* начинаются с нуля, поэтому первая пачка 5xx тоже видна
+sum(increase(envoy_app:upstream_rq_5xx_total:filled[10m]))
+  / sum(increase(envoy_app:upstream_rq_total:filled[10m]))
 # отказы rate limit (429)
 sum(increase(envoy_http_local_rate_limit_rate_limited[1h]))
 # SLO: доля ошибок за 1 ч и скорость расхода бюджета (1 = ровно за 30 дней)
@@ -293,28 +389,46 @@ gatewayapi_gateway_status{type="Programmed"}
 
 ### 8. Безопасность
 
+Без пароля — 401; служебные и пишущие пути через Gateway не проходят даже с
+паролем — 404:
+
 ```bash
-# без пароля — 401
 gwcurl -o /dev/null -w '%{http_code}\n' https://prometheus.demo.local/
 gwcurl -o /dev/null -w '%{http_code}\n' https://logs.demo.local/select/vmui/
-# служебные и пишущие пути через Gateway не проходят даже с паролем — 404
 gwcurl -o /dev/null -w '%{http_code}\n' -u "admin:$PASS" -X POST https://prometheus.demo.local/-/quit
 gwcurl -o /dev/null -w '%{http_code}\n' -u "admin:$PASS" -X POST https://logs.demo.local/insert/jsonline
-# etcd :2381 снаружи не слушает; прокси метрик etcd без токена — 401
-curl -sS -m 5 http://$IP:2381/metrics                                   # Failed to connect
-curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics   # 401
-# с другой машины: node-exporter и метрики Cilium закрыты (на самом узле 9100 → 401)
-curl -sS -m 5 -k https://$IP:9100/metrics                               # Failed to connect
-curl -sS -m 5 http://$IP:9962/metrics                                   # Failed to connect
+```
+
+```text
+401
+401
+404
+404
+```
+
+etcd `:2381` снаружи не слушает (`Failed to connect`), прокси метрик etcd
+без токена — 401:
+
+```bash
+curl -sS -m 5 http://$IP:2381/metrics
+curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics
+```
+
+С другой машины: node-exporter и метрики Cilium закрыты — обе команды
+печатают `Failed to connect` (на самом узле `:9100` отвечает 401):
+
+```bash
+curl -sS -m 5 -k https://$IP:9100/metrics
+curl -sS -m 5 http://$IP:9962/metrics
 ```
 
 Сетевые политики изнутри кластера (на узле): под в `demo` не достаёт до
-Prometheus — пакеты отброшены политикой:
+Prometheus — пакеты отброшены политикой, curl печатает
+`curl: (28) Connection timed out`:
 
 ```bash
 kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimages/curl:8.16.0 \
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"np-check","image":"docker.io/curlimages/curl:8.16.0","args":["-sS","-m","5","-X","POST","http://kube-prometheus-stack-prometheus.monitoring:9090/-/quit"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
-# curl: (28) Connection timed out
 ```
 
 Модель угроз и остальные меры — [security.md](security.md).
@@ -322,28 +436,42 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 ### 9. Несколько узлов
 
 После `make add-worker` (см. [operations.md](operations.md#несколько-узлов)):
+оба узла `Ready`, реплики Envoy и приложения на разных узлах, Gateway
+отвечает и на адресе воркера (`WORKER_IP` — ваш), `make verify` выполняет
+шаг 9:
 
 ```bash
-kubectl get nodes -o wide                                  # оба Ready
-kubectl get pods -A -o wide | grep -E 'envoy-gateway-public|web-v'   # реплики на разных узлах
-curl -sS --cacert ca.crt --resolve app.demo.local:443:<IP воркера> https://app.demo.local/   # Gateway на адресе воркера
-make verify                                                # шаг 9
+WORKER_IP=192.0.2.21
+kubectl get nodes -o wide
+kubectl get pods -A -o wide | grep -E 'envoy-gateway-public|web-v'
+curl -sS --cacert ca.crt --resolve "app.demo.local:443:$WORKER_IP" https://app.demo.local/
+make verify
 ```
 
 ### 10. Трейсинг
 
 Если трейсинг включён (`make status` → `Tracing deployed: on`):
 
+Envoy сбрасывает спаны раз в 5 с, VictoriaTraces показывает их с задержкой
+~10–20 с, поэтому между запросом и поиском трейса — 30 с:
+
 ```bash
 TID=$(openssl rand -hex 16)
 gwcurl -H "traceparent: 00-$TID-$(openssl rand -hex 8)-01" https://app.demo.local/
-sleep 30            # Envoy сбрасывает спаны раз в 5 с, VictoriaTraces показывает их с задержкой ~10–20 с
+sleep 30
 gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID \
   | jq -r '.data[0].spans[]?.operationName'
-# ingress
-# router httproute/gateway/app/rule/2 egress
-# mirror
-# тот же запрос в логах (Envoy и Angie, включая копию зеркала):
+```
+
+```text
+ingress
+router httproute/gateway/app/rule/2 egress
+mirror
+```
+
+Тот же запрос в логах (Envoy и Angie, включая копию зеркала):
+
+```bash
 gwcurl -u "admin:$PASS" https://logs.demo.local/select/logsql/query \
   --data-urlencode "query=trace_id:=\"$TID\"" | jq -c '{c: ."kubernetes.container_name", trace_id, version}'
 ```
@@ -362,15 +490,18 @@ trace» в Grafana). В Grafana: Explore → `Traces` → TraceID или Search
 Envoy — у каждого запроса, поэтому у нетрассируемого «View trace» из записи
 Envoy покажет «trace not found».
 
-Выключить и проверить, что ничего не осталось (на узле):
+Выключить и проверить, что ничего не осталось (на узле): namespace
+`tracing` — `NotFound`, `grep` по томам и блок `tracing` в EnvoyProxy —
+пусто, шаг 10 `make verify` — `- Tracing  tracing is off (…)`; последняя
+команда включает трейсинг обратно (повтор — без изменений):
 
 ```bash
 TRACING=false make platform
-kubectl get ns tracing                     # NotFound
-kubectl get pv | grep tracing              # пусто
-kubectl -n envoy-gateway-system get envoyproxy node-lb -o jsonpath='{.spec.telemetry.tracing}'   # пусто
-make verify                                # шаг 10: «- Tracing  tracing is off (…)»
-TRACING=true make platform                 # обратно; повтор — без изменений
+kubectl get ns tracing
+kubectl get pv | grep tracing
+kubectl -n envoy-gateway-system get envoyproxy node-lb -o jsonpath='{.spec.telemetry.tracing}'
+make verify
+TRACING=true make platform
 ```
 
 ## Веб-интерфейсы
@@ -393,9 +524,37 @@ kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-passwor
 kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-Чтобы открыть их в браузере с другой машины, добавьте в её `/etc/hosts`
-строку `<IP узла> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local`
-и импортируйте `ca.crt` (или согласитесь с предупреждением браузера).
+**С другой машины в браузере** имена `*.demo.local` нужно направить на IP
+узла. Три способа, без правки `/etc/hosts` — первые два.
+
+1. **Chrome с правилом резолвинга** (отдельный временный профиль, обычный
+   Chrome не затрагивается; `IP` — адрес узла). Сертификат демо-CA браузеру
+   неизвестен: Chrome покажет предупреждение «Подключение не защищено» →
+   «Дополнительные» → «Перейти на сайт». На macOS:
+
+   ```bash
+   open -na 'Google Chrome' --args --user-data-dir=/tmp/demo-chrome \
+     --host-resolver-rules="MAP *.demo.local $IP" https://grafana.demo.local
+   ```
+
+   На Linux — те же аргументы у `google-chrome`. Без предупреждения —
+   если доверить `ca.crt` (macOS: двойной щелчок → «Связка ключей» →
+   сертификат `demo.local root CA` → «Доверять: всегда»; потом его можно
+   удалить там же).
+2. **SSH-туннель только к Grafana** (без DNS и сертификатов,
+   `ssh ubuntu@$IP` — ваш вход на узел): туннель держится, пока работает
+   команда, Grafana — на `http://localhost:3000`. Вход тот же,
+   `admin` / пароль Grafana.
+
+   ```bash
+   ssh -L 3000:localhost:3000 ubuntu@$IP \
+     'kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80'
+   ```
+
+3. **`/etc/hosts`**: строка `<IP узла> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local`
+   и импорт `ca.crt` (или согласие с предупреждением браузера).
+
+Из терминала все UI доступны через `gwcurl` (см. [«Переменные»](#переменные)).
 
 Дашборды Grafana: **Demo app — golden signals** (папка General: RPS, доля
 5xx, p50/p95/p99, раскладка v1/v2, 429, реплики, CPU и память, логи

@@ -81,11 +81,12 @@ IP узла определяется автоматически (интерфе�
 
 Если узел выходит в интернет только через HTTP(S)-прокси, задайте его при
 каждом запуске (без этих переменных про прокси ничего не настраивается, а
-настройки прошлого запуска с прокси удаляются):
+настройки прошлого запуска с прокси удаляются); `make verify` и
+`make images` запускайте из той же сессии:
 
 ```bash
 export HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:3128
-./deploy.sh            # и make verify / make images из той же сессии
+./deploy.sh
 ```
 
 Годится любое написание (`HTTP_PROXY` или `http_proxy`); `NO_PROXY` можно
@@ -126,18 +127,21 @@ VirtualBox ≥ 7 или libvirt/KVM с плагином `vagrant-libvirt`, `rsyn
 ~8 ГБ свободной памяти и ~30 ГБ диска. **Apple Silicon (arm64) не
 поддерживается**: решение и образы — только amd64.
 
+Одна из команд: VirtualBox; libvirt/KVM; минимум (по умолчанию 4 vCPU /
+8 ГБ); другой адрес (по умолчанию 192.168.56.10):
+
 ```bash
-vagrant up                                  # VirtualBox
-vagrant up --provider=libvirt               # libvirt/KVM
-VM_CPUS=2 VM_MEMORY=4096 vagrant up         # минимум (по умолчанию 4 vCPU / 8 ГБ)
-VM_IP=192.168.57.10 vagrant up              # другой адрес (по умолчанию 192.168.56.10)
+vagrant up
+vagrant up --provider=libvirt
+VM_CPUS=2 VM_MEMORY=4096 vagrant up
+VM_IP=192.168.57.10 vagrant up
 ```
 
-В конце `vagrant up` печатает, как проверить:
+В конце `vagrant up` печатает, как проверить: первая команда — `make verify`
+внутри ВМ, две другие — с вашей машины (нужны curl и jq):
 
 ```bash
-vagrant ssh -c 'cd kubeadm-gateway-observability && make verify'      # внутри ВМ
-# с вашей машины (нужны curl и jq)
+vagrant ssh -c 'cd kubeadm-gateway-observability && make verify'
 vagrant ssh --no-tty -c 'cd kubeadm-gateway-observability && make ca >/dev/null && cat ca.crt' > ca.crt
 curl --cacert ca.crt --resolve app.demo.local:443:192.168.56.10 https://app.demo.local/
 ```
@@ -201,16 +205,31 @@ xDS) и BackendTrafficPolicy UI-маршрутов. Без кластера (`ma
 
 ## Несколько узлов
 
+На control plane после `./deploy.sh`; воркер — Ubuntu 24.04 amd64, доступный
+по SSH, с `sudo` без пароля. Подготовка SSH (ключ, если его ещё нет; ключ на
+воркер — `ssh-copy-id` заодно запоминает host key воркера в
+`~/.ssh/known_hosts`; проверка входа и `sudo` без пароля — печатает `ok`):
+
 ```bash
-# на control plane после ./deploy.sh; воркер — Ubuntu 24.04 amd64, SSH, sudo без пароля
-make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
-kubectl get nodes -o wide
-make verify                            # шаг 9 проверяет каждый узел
-make remove-worker WORKER=192.0.2.21   # вывести воркер обратно
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+ssh-copy-id -i ~/.ssh/id_ed25519.pub ubuntu@192.0.2.21
+ssh -i ~/.ssh/id_ed25519 ubuntu@192.0.2.21 'sudo -n true && echo ok'
 ```
 
-Ключ должен быть в `~/.ssh/authorized_keys` пользователя на воркере, а host
-key воркера — известен (один раз `ssh ubuntu@192.0.2.21`). Несколько
+Присоединить воркер, проверить (шаг 9 `make verify` проверяет каждый узел)
+и, если нужно, вывести обратно:
+
+```bash
+make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
+kubectl get nodes -o wide
+make verify
+make remove-worker WORKER=192.0.2.21
+```
+
+Если `sudo` на воркере спрашивает пароль, запустите
+`ANSIBLE_BECOME_ASK_PASS=true make add-worker …`: Ansible один раз спросит
+`BECOME password` и использует его и для control plane (пароли `sudo` на
+узлах должны совпадать, или на control plane `sudo` без пароля). Несколько
 воркеров — копией `ansible/inventory/multinode.example.yml`:
 `make add-worker INVENTORY=ansible/inventory/multinode.yml` (вывести всех —
 `make remove-worker INVENTORY=… FORCE=1`). Между узлами нужны TCP 6443,

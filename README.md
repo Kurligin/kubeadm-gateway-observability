@@ -10,14 +10,21 @@
 
 ## TL;DR
 
-На Ubuntu 24.04 amd64 (4 vCPU / 8 ГБ / 30 ГБ, sudo, интернет):
+На Ubuntu 24.04 amd64 (4 vCPU / 8 ГБ / 30 ГБ, sudo, интернет). `./deploy.sh`
+идёт ~8–10 мин, повторный запуск — ~40–50 с и ничего не меняет;
+`make verify` — 45–90 с (на двух узлах дольше): таблица проверок, код
+возврата 0 — всё работает.
 
 ```bash
 git clone https://github.com/Kurligin/kubeadm-gateway-observability.git
 cd kubeadm-gateway-observability
-./deploy.sh      # ~8–10 мин; повторный запуск ~40–50 с и ничего не меняет
-make verify      # ~45 с: таблица проверок, код возврата 0 — всё работает
+./deploy.sh
+make verify
 ```
+
+Фрагмент вывода `make verify` на стенде: один узел, трейсинг включён
+(29 проверок и 2 пропуска; с выключенным трейсингом шаг 10 тоже
+пропускается, с воркером — `Passed: 35, failed: 0, skipped: 1`):
 
 ```text
  ✓  3   HTTPS -> 200 "Hello World!"                  200, TLS verified by the demo CA: Hello World! version=v1 pod=web-v1-…
@@ -120,13 +127,17 @@ default-deny, Pod Security `restricted`, генерация паролей, об
 | BackendTrafficPolicy | `app`, `app-limited`, `ui-*` | таймаут соединения, безопасные ретраи, локальный rate limit (500/с и 10/мин на реплику); на `ui-*` трейсинг выключен |
 | SecurityPolicy | `ui-prometheus`, `ui-alertmanager`, `ui-logs`, `ui-traces` | basic auth (у этих UI нет своей аутентификации) |
 
-Проверка на узле, из каталога репозитория:
+Проверка на узле, из каталога репозитория (`make ca` пишет корень демо-CA
+в `./ca.crt`):
 
 ```bash
-make ca                     # корень демо-CA в ./ca.crt
+make ca
 IP=$(kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].value}')
 curl --cacert ca.crt --resolve app.demo.local:443:$IP https://app.demo.local/
-# Hello World! version=v1 pod=web-v1-…
+```
+
+```text
+Hello World! version=v1 pod=web-v1-…
 ```
 
 ## Требования к среде
@@ -160,14 +171,41 @@ curl --cacert ca.crt --resolve app.demo.local:443:$IP https://app.demo.local/
 | интернет только через прокси | `HTTP_PROXY=http://proxy:3128 HTTPS_PROXY=http://proxy:3128 ./deploy.sh` |
 | нет Ubuntu 24.04 под рукой | `vagrant up` (VirtualBox или libvirt, хост amd64) |
 | трейсинг явно | `TRACING=true ./deploy.sh` или `TRACING=false ./deploy.sh` |
-| второй узел | `make add-worker WORKER=<IP> WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519` |
+| второй узел | `make add-worker WORKER=<IP> WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519` ([ниже](#несколько-узлов)) |
 | удалить кластер | `make destroy FORCE=1` |
+
+### Несколько узлов
+
+Воркер — Ubuntu 24.04 amd64, доступный с control plane по SSH. Перед
+`make add-worker` на control plane: ключ SSH (если его ещё нет), ключ на
+воркер (`ssh-copy-id` заодно запоминает host key воркера в
+`~/.ssh/known_hosts`), проверка входа и `sudo` без пароля — она должна
+напечатать `ok`. Адрес `192.0.2.21` и пользователь — ваши.
+
+```bash
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+ssh-copy-id -i ~/.ssh/id_ed25519.pub ubuntu@192.0.2.21
+ssh -i ~/.ssh/id_ed25519 ubuntu@192.0.2.21 'sudo -n true && echo ok'
+make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
+```
+
+Если `sudo` на воркере спрашивает пароль (`sudo: a password is required`),
+запустите последнюю команду как
+`ANSIBLE_BECOME_ASK_PASS=true make add-worker …`: Ansible один раз спросит
+`BECOME password` (он же используется для control plane, поэтому пароль
+`sudo` на обоих узлах должен совпадать, или на control plane `sudo` без
+пароля). `make add-worker` — 1,5–2 мин, затем `make verify` (35 проверок).
+Подробнее — [docs/operations.md](docs/operations.md#несколько-узлов).
 
 ## Проверка
 
 `make verify` на узле делает всё описанное ниже сам (около 30 проверок в 10
-шагах, таблица — [docs/verification.md](docs/verification.md)); с другой
-машины: `GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh`.
+шагах, 45–90 с, таблица — [docs/verification.md](docs/verification.md)); с
+другой машины: `GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh`.
+
+Команды ниже можно копировать целиком в bash и zsh (в том числе в zsh
+macOS по умолчанию): комментариев внутри блоков нет, ожидаемый вывод —
+отдельным блоком.
 
 **Переменные** — один раз в сессии (bash и zsh; нужны `curl` и `jq`). На
 узле, из каталога репозитория:
@@ -186,51 +224,74 @@ ssh ubuntu@$IP 'cd kubeadm-gateway-observability && make ca >/dev/null && cat ca
 PASS=$(ssh ubuntu@$IP 'kubectl -n gateway get secret ui-basic-auth -o jsonpath={.data.password} | base64 -d')
 ```
 
-Дальше — curl к Gateway без DNS (`--resolve`), с проверкой сертификата:
+Дальше — curl к Gateway без DNS (`--resolve` подставляет IP для всех имён
+`*.demo.local`, включая Grafana и Alertmanager), с проверкой сертификата:
 
 ```bash
 gwcurl() {
   curl -sS --noproxy '*' --cacert ca.crt \
-    --resolve "app.demo.local:443:$IP" --resolve "prometheus.demo.local:443:$IP" \
+    --resolve "app.demo.local:443:$IP" --resolve "grafana.demo.local:443:$IP" \
+    --resolve "prometheus.demo.local:443:$IP" --resolve "alertmanager.demo.local:443:$IP" \
     --resolve "logs.demo.local:443:$IP" --resolve "traces.demo.local:443:$IP" "$@"
 }
 ```
 
 ### 1. Приложение через Gateway API
 
+Ответ приложения, маршрут `/v2` (всегда v2), раскладка canary на 100
+запросах и редирект HTTP → HTTPS:
+
 ```bash
-gwcurl https://app.demo.local/                       # Hello World! version=v1 pod=web-v1-…
-gwcurl https://app.demo.local/v2                     # всегда version=v2
+gwcurl https://app.demo.local/
+gwcurl https://app.demo.local/v2
 for i in $(seq 100); do gwcurl https://app.demo.local/; done | awk '{print $3}' | sort | uniq -c
-#   ~90 version=v1, ~10 version=v2
 curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'Host: app.demo.local' http://$IP/
-# 301 https://app.demo.local/
+```
+
+```text
+Hello World! version=v1 pod=web-v1-…
+Hello World! version=v2 pod=web-v2-…
+  90 version=v1
+  10 version=v2
+301 https://app.demo.local/
 ```
 
 ### 2. Мониторинг
 
 Метрики: Envoy (запросы, коды, задержки по маршрутам, 429), Angie (запросы
 по версиям и кодам), control plane, etcd, CoreDNS, kubelet, node-exporter,
-kube-state-metrics (и статус Gateway), Cilium, Fluentd, хранилища. Цели и PromQL:
+kube-state-metrics (и статус Gateway), Cilium, Fluentd, хранилища. Цели
+(все `up`) и запрос PromQL:
 
 ```bash
 gwcurl -u "admin:$PASS" https://prometheus.demo.local/api/v1/targets \
-  | jq -r '.data.activeTargets[] | .health + " " + .labels.job' | sort | uniq -c   # все "up"
+  | jq -r '.data.activeTargets[] | .health + " " + .labels.job' | sort | uniq -c
 gwcurl -u "admin:$PASS" -G https://prometheus.demo.local/api/v1/query \
   --data-urlencode 'query=sum by (version) (angie_http_server_zones_requests_total{zone="app"})' \
   | jq -c '.data.result[] | {version: .metric.version, requests: .value[1]}'
-# {"version":"v1","requests":"977"}  {"version":"v2","requests":"119"}
+```
+
+```text
+   1 up apiserver
+   2 up envoy
+   …
+{"version":"v1","requests":"977"}
+{"version":"v2","requests":"119"}
 ```
 
 Grafana (`https://grafana.demo.local`, пароль — `make ui`): дашборды «Demo
-app — golden signals» и «Gateway / SLO». Больше запросов —
-[docs/verification.md](docs/verification.md#7-мониторинг).
+app — golden signals» и «Gateway / SLO». Без правки `/etc/hosts` её можно
+открыть в Chrome с правилом резолвинга или через SSH-туннель —
+[docs/verification.md](docs/verification.md#веб-интерфейсы). Больше
+запросов — [docs/verification.md](docs/verification.md#7-мониторинг).
 
 ### 3. Логирование
 
 Fluentd собирает логи всех контейнеров (access/error-логи Angie, access-лог
 Envoy — JSON в поля), добавляет namespace, под, контейнер и шлёт в
-VictoriaLogs на 7 дней. Запрос с уникальным `X-Request-ID` — в логах:
+VictoriaLogs на 7 дней. Запрос с уникальным `X-Request-ID` — в логах три
+записи: Angie (`traffic: app`), Angie (`traffic: shadow` — копия зеркала) и
+Envoy:
 
 ```bash
 RID="check-$(date +%s)"
@@ -239,19 +300,21 @@ sleep 15
 gwcurl -u "admin:$PASS" https://logs.demo.local/select/logsql/query \
   --data-urlencode "query=x_request_id:\"$RID\"" \
   | jq -c '{_time, container: ."kubernetes.container_name", traffic, status, uri}'
-# три записи: Angie (traffic: app), Angie (traffic: shadow — копия зеркала), Envoy
 ```
 
 UI логов — `https://logs.demo.local/select/vmui/` (`admin` / `$PASS`).
 
 ### 4. Трейсинг (если включён)
 
+Запрос со своим `traceparent`, через 30 с — его трейс: спаны `ingress`,
+`router … egress` и `mirror`:
+
 ```bash
 TID=$(openssl rand -hex 16)
 gwcurl -H "traceparent: 00-$TID-$(openssl rand -hex 8)-01" https://app.demo.local/
 sleep 30
 gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID \
-  | jq -r '.data[0].spans[]?.operationName'          # ingress, router … egress, mirror
+  | jq -r '.data[0].spans[]?.operationName'
 ```
 
 ## Дополнительные возможности
@@ -296,6 +359,15 @@ gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID 
   `X-Request-ID` не в формате UUID не трассируются; VictoriaTraces — 0.x.
 - **Исходящий трафик подов не ограничен**; `kubeadm upgrade` не
   автоматизирован; e2e в CI — только одноузловой; платформа по SSH не ставится.
+- **Cilium при установке печатает `WARNING: TLS is not enabled for the Hubble
+  Relay server`**: без TLS только gRPC-сервер Hubble Relay (Service ClusterIP,
+  снаружи кластера недоступен, клиент — `hubble` с узла); связь Relay с
+  подами `cilium-agent` идёт по mTLS (сертификаты выпускает CronJob Cilium).
+- **Сброс узла** (`kubeadm reset` в `make remove-worker` и `make destroy`,
+  на воркере чаще) может печатать ошибки `StopPodSandbox … DeadlineExceeded`:
+  reset останавливает все поды разом, и если `cilium-agent` остановлен раньше
+  остальных, сеть их подов не снимается через CNI за отведённое время. Поды
+  всё равно удаляются, команда завершается успешно — это шум.
 
 ## Документация
 

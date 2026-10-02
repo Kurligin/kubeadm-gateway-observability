@@ -82,12 +82,21 @@ Prometheus. Prometheus предъявляет проецируемый коро�
 CA. Пробы — HTTPS `/healthz` на отдельном порту 2383: TCP-проба на основной
 порт засоряла бы лог ошибками TLS handshake.
 
+На узле (нужен kubectl): без токена — 401, с токеном чужого ServiceAccount
+— 403, а `:2381` недоступен (`Failed to connect`: etcd слушает только
+`127.0.0.1`):
+
 ```bash
-# на узле (нужен kubectl)
-curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics      # 401
+curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics
 TOKEN=$(kubectl -n demo create token default)
-curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt -H "Authorization: Bearer $TOKEN" https://$IP:2382/metrics   # 403
-curl -sS -m 5 http://$IP:2381/metrics           # Failed to connect: etcd слушает только 127.0.0.1
+curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt -H "Authorization: Bearer $TOKEN" https://$IP:2382/metrics
+curl -sS -m 5 http://$IP:2381/metrics
+```
+
+```text
+401
+403
+curl: (7) Failed to connect to 192.168.1.38 port 2381 …
 ```
 
 ## node-exporter за kube-rbac-proxy
@@ -113,10 +122,12 @@ Cilium) таблица не трогает. `make destroy` снимает таб
 всё, что не разрешено явно (риск отрезать SSH и kubelet), а здесь правило
 одно и узкое.
 
+С другой машины в той же сети обе команды печатают `Failed to connect`
+(TCP reset):
+
 ```bash
-# с другой машины в той же сети
-curl -sS -m 5 http://$IP:9962/metrics           # Failed to connect (TCP reset)
-curl -sS -m 5 -k https://$IP:9100/metrics       # Failed to connect (TCP reset)
+curl -sS -m 5 http://$IP:9962/metrics
+curl -sS -m 5 -k https://$IP:9100/metrics
 ```
 
 ## Pod Security
