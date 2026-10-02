@@ -52,7 +52,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1 - ((sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", envoy_response_code_class=\"5\"}[$__range])) or vector(0)) / sum(increase(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__range])))",
+          "expr": "1 - ((sum(increase(envoy_app:upstream_rq_5xx_total:filled[$__range])) or vector(0)) / sum(increase(envoy_app:upstream_rq_total:filled[$__range])))",
           "legendFormat": "",
           "refId": "A",
           "range": true

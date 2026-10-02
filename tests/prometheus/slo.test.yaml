@@ -202,3 +202,49 @@ tests:
         exp_samples:
           - labels: '{slo="app-latency"}'
             value: 0.2
+
+  # Envoy creates its traffic counters lazily: after a restart the request
+  # and 5xx series of the route appear with the first batch, already at 10.
+  # rate() over the raw series would need a second sample and show nothing;
+  # the zero-filled copies start at 0 with the cluster
+  # (envoy_cluster_membership_total), so the first batch counts.
+  - name: first batch of 5xx in fresh series -> counted
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_membership_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '1x30'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '_x10 10x20'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a", envoy_response_code_class="5"}'
+        values: '_x10 10x20'
+    promql_expr_test:
+      - expr: envoy_app:upstream_rq_5xx_total:filled
+        eval_time: 5m
+        exp_samples:
+          - labels: 'envoy_app:upstream_rq_5xx_total:filled{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+            value: 0
+      - expr: round(slo:sli_error:ratio_rate5m{slo="app-availability"}, 0.0001)
+        eval_time: 13m
+        exp_samples:
+          - labels: '{slo="app-availability"}'
+            value: 1
+
+  # Earlier traffic (60 requests a minute), then the first 5xx: only the 5xx
+  # series is new. 10 failed out of the 300 requests of the last 5 minutes.
+  - name: first 5xx after healthy traffic -> counted
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_membership_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '1x30'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a"}'
+        values: '0+60x30'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", pod="a", envoy_response_code_class="5"}'
+        values: '_x10 10x20'
+    promql_expr_test:
+      # About 0.033; within one evaluation step of the recorded counters
+      # (rule groups are evaluated in no fixed order), hence a range.
+      - expr: count(slo:sli_error:ratio_rate5m{slo="app-availability"} > 0.02 < 0.06)
+        eval_time: 13m
+        exp_samples:
+          - labels: '{}'
+            value: 1

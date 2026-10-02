@@ -286,6 +286,12 @@ releases:
       - local-path-storage/local-path-provisioner
     values:
       - values/victoria-logs.yaml.gotmpl
+    # The chart renders all its Grafana dashboards and has no switch for
+    # each (chart 0.13.8 ignores their "condition"): keep the VictoriaLogs
+    # one, drop the one for Vector (not used here; logs come from Fluentd).
+    postRenderer: ./scripts/drop-manifests.sh
+    postRendererArgs:
+      - ConfigMap/victoria-logs-victoria-logs-single-vector-k8s-monitoring
 
   # Trace storage: spans from the Envoy proxies (OTLP/gRPC), Jaeger query
   # API for Grafana. Only with tracing on; `installed: false` uninstalls it

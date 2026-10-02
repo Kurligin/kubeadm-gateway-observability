@@ -62,7 +62,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__rate_interval]))",
+          "expr": "sum(rate(envoy_app:upstream_rq_total:filled[$__rate_interval]))",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -112,7 +112,7 @@
     {
       "type": "stat",
       "title": "5xx share",
-      "description": "Share of 5xx responses from the application (Envoy upstream statistics).",
+      "description": "Share of 5xx responses from the application (Envoy upstream statistics). Counted from zero (recording rules envoy_app:*), so the first failed requests after an Envoy restart show up too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -123,7 +123,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", envoy_response_code_class=\"5\"}[$__rate_interval])) or vector(0)) / (sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__rate_interval])) > 0)",
+          "expr": "(sum(rate(envoy_app:upstream_rq_5xx_total:filled[$__rate_interval])) or vector(0)) / (sum(rate(envoy_app:upstream_rq_total:filled[$__rate_interval])) > 0)",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -249,8 +249,8 @@
     },
     {
       "type": "stat",
-      "title": "Canary share (v2)",
-      "description": "Share of requests served by web-v2 (Angie request counters). Expected about 10 %.",
+      "title": "Canary share (v2), time range",
+      "description": "Share of requests served by web-v2 over the whole time range of the dashboard (Angie request counters), so a quiet minute does not read as 0 %. Expected about 10 %; no value without requests.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -261,7 +261,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\", version=\"v2\"}[$__rate_interval])) / (sum(rate(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__rate_interval])) > 0)",
+          "expr": "sum(increase(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\", version=\"v2\"}[$__range])) / (sum(increase(angie_http_server_zones_requests_total{namespace=\"demo\", zone=\"app\"}[$__range])) > 0)",
           "legendFormat": "",
           "refId": "A",
           "range": true
@@ -295,7 +295,7 @@
           "values": false
         },
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "textMode": "value",
         "justifyMode": "auto",
         "orientation": "auto"
@@ -596,7 +596,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (envoy_response_code_class) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\"}[$__rate_interval]))",
+          "expr": "sum by (envoy_response_code_class) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~\"httproute/gateway/app/rule/[0-9]+\", envoy_response_code_class!=\"5\"}[$__rate_interval])) or label_replace(sum(rate(envoy_app:upstream_rq_5xx_total:filled[$__rate_interval])), \"envoy_response_code_class\", \"5\", \"\", \"\")",
           "legendFormat": "{{envoy_response_code_class}}xx",
           "refId": "A",
           "range": true
@@ -975,7 +975,7 @@
           "refId": "A",
           "queryType": "statsRange",
           "editorMode": "code",
-          "expr": "{kubernetes.namespace_name=\"demo\"} | stats by (log_type) count() lines",
+          "expr": "{kubernetes.namespace_name=\"demo\"} log_type:in(access, error) | stats by (log_type) count() lines",
           "legendFormat": "{{log_type}}"
         }
       ],
@@ -1017,7 +1017,7 @@
     {
       "type": "logs",
       "title": "Application logs (Angie access and error)",
-      "description": "Latest log lines of the demo namespace. Filter by request: x_request_id:\"<id>\".",
+      "description": "Latest log lines of the demo namespace. Filter by request: x_request_id:\"<id>\". Access log lines have no level of their own and are shown as info.",
       "datasource": {
         "type": "victoriametrics-logs-datasource",
         "uid": "victorialogs"
@@ -1031,7 +1031,7 @@
           "refId": "A",
           "queryType": "instant",
           "editorMode": "code",
-          "expr": "{kubernetes.namespace_name=\"demo\"}",
+          "expr": "{kubernetes.namespace_name=\"demo\"} | format if (level:\"\") \"info\" as level",
           "maxLines": 200
         }
       ],
@@ -1067,7 +1067,7 @@
           "refId": "A",
           "queryType": "instant",
           "editorMode": "code",
-          "expr": "{kubernetes.namespace_name=\"demo\"} kubernetes.container_name:=angie traffic:=app trace_id:~\".+\"",
+          "expr": "{kubernetes.namespace_name=\"demo\"} kubernetes.container_name:=angie traffic:=app trace_id:~\".+\" | format if (level:\"\") \"info\" as level",
           "maxLines": 100
         }
       ],

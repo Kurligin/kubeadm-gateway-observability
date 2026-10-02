@@ -26,6 +26,14 @@ defaultRules:
     kubeProxy: false
     windows: false
 
+# Node dashboards for Linux only (the stock AIX and macOS ones stay out).
+nodeExporter:
+  operatingSystems:
+    aix:
+      enabled: false
+    darwin:
+      enabled: false
+
 # --- Prometheus Operator ---
 prometheusOperator:
   image:

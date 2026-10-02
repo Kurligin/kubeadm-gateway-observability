@@ -24,10 +24,12 @@ spec:
             slo: {{ $o.name }}
         {{- range $w := $slo.windows }}
         {{- if eq $o.kind "availability" }}
-        # Requests per second (the denominator of the ratio below).
+        # Requests per second (the denominator of the ratio below). The
+        # envoy_app:* counters start at zero (see prometheusrule.yaml), so the
+        # first requests and the first 5xx after an Envoy restart count too.
         - record: {{ printf "slo:sli_requests:rate%s" $w }}
           expr: |
-            sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}]))
+            sum(rate(envoy_app:upstream_rq_total:filled[{{ $w }}]))
           labels:
             slo: {{ $o.name }}
         # Share of 5xx answers (0 when there were requests, but no 5xx; no
@@ -35,11 +37,11 @@ spec:
         - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
           expr: |
             (
-              (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[{{ $w }}])) or vector(0))
+              (sum(rate(envoy_app:upstream_rq_5xx_total:filled[{{ $w }}])) or vector(0))
               /
-              sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}]))
+              sum(rate(envoy_app:upstream_rq_total:filled[{{ $w }}]))
             )
-            and on () (sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}])) > 0)
+            and on () (sum(rate(envoy_app:upstream_rq_total:filled[{{ $w }}])) > 0)
           labels:
             slo: {{ $o.name }}
         {{- else if eq $o.kind "latency" }}

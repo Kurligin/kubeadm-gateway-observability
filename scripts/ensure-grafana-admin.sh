@@ -26,7 +26,7 @@ main() {
   local namespace=$1 secret=$2 username=$3 deployment=${4:-}
 
   if kubectl -n "${namespace}" get secret "${secret}" >/dev/null 2>&1; then
-    log "Secret ${namespace}/${secret} already exists, keeping it"
+    log "Secret ${namespace}/${secret} is in place, password unchanged"
     return
   fi
 

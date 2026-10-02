@@ -10,6 +10,28 @@ metadata:
     {{- include "observability-extras.labels" . | nindent 4 }}
 spec:
   groups:
+    # --- Request and 5xx counters of the application route, from zero ---
+    # Envoy creates the traffic counters of a cluster lazily: the request
+    # counter on the first request, the 5xx counter on the first 5xx. The
+    # series appears in Prometheus already above zero, and rate()/increase()
+    # need two samples, so the first batch is invisible: 10 failed requests
+    # in a fresh series read as 0 % errors. These copies (per Envoy pod and
+    # cluster) start at 0 as soon as the cluster exists:
+    # envoy_cluster_membership_total is created together with the cluster.
+    # Used by High5xxRate, the SLO rules and the dashboards.
+    - name: envoy-app-counters
+      rules:
+        - record: envoy_app:upstream_rq_total:filled
+          expr: |
+            sum by (namespace, pod, envoy_cluster_name) (envoy_cluster_upstream_rq_total{ {{- $app }}})
+            or
+            0 * group by (namespace, pod, envoy_cluster_name) (envoy_cluster_membership_total{ {{- $app }}})
+        - record: envoy_app:upstream_rq_5xx_total:filled
+          expr: |
+            sum by (namespace, pod, envoy_cluster_name) (envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"})
+            or
+            0 * group by (namespace, pod, envoy_cluster_name) (envoy_cluster_membership_total{ {{- $app }}})
+
     # --- Demo application behind the Gateway ---
     - name: demo-app
       rules:
@@ -29,12 +51,12 @@ spec:
         - alert: High5xxRate
           expr: |
             (
-              (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[5m])) or vector(0))
+              (sum(rate(envoy_app:upstream_rq_5xx_total:filled[5m])) or vector(0))
               /
-              sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m]))
+              sum(rate(envoy_app:upstream_rq_total:filled[5m]))
             ) > {{ $a.errorRatio }}
             and
-            sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[5m])) > {{ $a.minRequestRate }}
+            sum(rate(envoy_app:upstream_rq_total:filled[5m])) > {{ $a.minRequestRate }}
           for: 5m
           labels:
             severity: warning
