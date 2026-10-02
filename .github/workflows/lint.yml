@@ -1,0 +1,45 @@
+---
+# Static checks, no cluster: everything `make lint` runs (shellcheck,
+# yamllint, ansible-lint, helm lint, promtool rules check and unit tests,
+# ruff/black and Python unit tests, image digests, kubeconform, trivy config,
+# kube-linter). Tools are installed by `make lint-deps` at the versions and
+# checksums pinned in versions.env and requirements-dev.txt.
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install lint tools (make lint-deps)
+        run: make lint-deps
+
+      - name: Run every check (make lint)
+        run: |
+          make lint 2>&1 | tee lint.log
+          # A check whose tool is missing is skipped by `make lint`; here
+          # every tool is installed, so a skip means a broken setup.
+          if grep -q '^skip:' lint.log; then
+            echo '::error::some checks were skipped, see the log above'
+            exit 1
+          fi

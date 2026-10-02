@@ -1,0 +1,94 @@
+---
+# End-to-end test on a fresh GitHub-hosted Ubuntu 24.04 runner, the way an
+# expert deploys: `./deploy.sh` (kubeadm cluster on the runner itself, local
+# Ansible inventory), `make verify`, then `./deploy.sh` again, which must
+# change nothing (Ansible changed=0, no Helm release upgraded, no new Helm
+# revision), and `make verify` once more. On failure, pods, events, logs and
+# the kubelet/containerd journals are uploaded as an artifact.
+name: e2e
+
+on:
+  push:
+    branches: [main, ci-dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  LOG_DIR: /tmp/e2e-logs
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner image keeps ~14 GB free; the cluster needs ~10 GB and the
+      # kubelet starts evicting pods at 85 % disk usage. These SDKs are not
+      # used here.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Show the runner
+        run: |
+          mkdir -p "${LOG_DIR}"
+          . /etc/os-release
+          echo "${PRETTY_NAME}, kernel $(uname -r), $(nproc) CPU, $(free -g | awk '/^Mem/ {print $2}') GB RAM"
+
+      - name: Deploy (./deploy.sh)
+        run: ./deploy.sh 2>&1 | tee "${LOG_DIR}/deploy-1.log"
+
+      - name: Verify (make verify)
+        run: make verify 2>&1 | tee "${LOG_DIR}/verify-1.log"
+
+      - name: Kubelet certificate approver timer is active
+        run: |
+          unit=kubeadm-gateway-kubelet-cert-approver
+          systemctl is-enabled "${unit}.timer"
+          systemctl is-active "${unit}.timer"
+          sudo systemctl start "${unit}.service"
+          result="$(systemctl show --property=Result --value "${unit}.service")"
+          echo "${unit}.service: ${result}"
+          [[ ${result} == success ]]
+
+      - name: Save Helm release revisions
+        run: ./scripts/check-idempotency.sh snapshot "${LOG_DIR}/revisions-before.json"
+
+      - name: Deploy again (./deploy.sh)
+        run: ./deploy.sh 2>&1 | tee "${LOG_DIR}/deploy-2.log"
+
+      - name: Repeated deploy changed nothing
+        run: ./scripts/check-idempotency.sh check "${LOG_DIR}/deploy-2.log" "${LOG_DIR}/revisions-before.json"
+
+      - name: Verify again (make verify)
+        run: make verify 2>&1 | tee "${LOG_DIR}/verify-2.log"
+
+      - name: Collect diagnostics
+        if: failure() || cancelled()
+        run: ./scripts/collect-diagnostics.sh "${LOG_DIR}/diagnostics"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-logs
+          path: /tmp/e2e-logs
+          if-no-files-found: ignore
+          retention-days: 14
