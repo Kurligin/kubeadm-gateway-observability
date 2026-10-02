@@ -1,0 +1,13 @@
+# CRDs are applied by scripts/apply-gateway-crds.sh (see helmfile).
+crds:
+  enabled: false
+
+# Images pinned by digest. The controller image is also used by its certgen
+# job and by the shutdown manager next to every Envoy proxy; the rate limit
+# image is only referenced (global rate limiting is not used).
+global:
+  images:
+    envoyGateway:
+      image: {{ printf "docker.io/envoyproxy/gateway:v%s@%s" .Values.versions.ENVOY_GATEWAY_VERSION .Values.versions.ENVOY_GATEWAY_DIGEST | quote }}
+    ratelimit:
+      image: {{ .Values.versions.ENVOY_RATELIMIT_IMAGE | quote }}

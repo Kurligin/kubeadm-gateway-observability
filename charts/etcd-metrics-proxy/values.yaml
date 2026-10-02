@@ -3,6 +3,8 @@ image:
   repository: quay.io/brancz/kube-rbac-proxy
   # Required; set from versions.env (KUBE_RBAC_PROXY_VERSION) by helmfile.
   tag: ""
+  # sha256:<digest>, pins the image (versions.env KUBE_RBAC_PROXY_DIGEST).
+  digest: ""
   pullPolicy: IfNotPresent
 
 # Node address (API server address of the kubeadm cluster); added to the

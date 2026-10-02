@@ -27,14 +27,17 @@ vmui через тот же Gateway. Повторный запуск ничег�
 | Сетевые политики | чарт `charts/network-policies` + NetworkPolicy в `charts/demo-app` | во всех наших namespaces входящий трафик запрещён по умолчанию, разрешено только нужное (см. «Особенности») |
 | Порты метрик на узле | Ansible, роль `node_firewall` | nftables: порты метрик Cilium и node-exporter доступны только с самого узла и из сети подов |
 | TLS | cert-manager + чарт `charts/pki` | self-signed корень → CA `demo-ca` (ClusterIssuer) → сертификат `demo.local`, `*.demo.local` |
-| Вход | Envoy Gateway (CRD Gateway API — канал standard) + чарт `charts/gateway` | Gateway `public` на IP узла: HTTP 80 → 301 на HTTPS 443; маршруты, canary, политики |
+| Вход | Envoy Gateway (CRD Gateway API — канал standard) + чарт `charts/gateway` | Gateway `public` на IP узла: HTTP 80 → 301 на HTTPS 443; маршруты, canary, зеркалирование (`RequestMirror`), заголовки (`RequestHeaderModifier`/`ResponseHeaderModifier`), таймауты HTTPRoute, политики; Envoy — 2 реплики с PodDisruptionBudget |
 | UI | чарт `charts/ui-routes` | маршруты к Grafana, Prometheus, Alertmanager и vmui на том же Gateway, basic auth, только нужные методы и пути |
 | Приложение | чарт `charts/demo-app` | Angie `web-v1` / `web-v2` по 2 реплики, JSON access-лог, метрики `/p8s` |
 | CRD мониторинга | чарт `prometheus-operator-crds` | ServiceMonitor, PodMonitor, PrometheusRule и др. — самым первым релизом |
 | Метрики | kube-prometheus-stack | Prometheus (3 дня, PVC), Alertmanager, Grafana, node-exporter (за kube-rbac-proxy), kube-state-metrics, правила и дашборды по кластеру |
 | Метрики etcd | чарт `charts/etcd-metrics-proxy` | kube-rbac-proxy: TLS + токен + RBAC перед `127.0.0.1:2381` etcd |
 | Логи | VictoriaLogs + чарт `charts/logging` (Fluentd) | Fluentd DaemonSet читает логи всех контейнеров, добавляет метаданные Kubernetes, шлёт в VictoriaLogs (7 дней, PVC) |
-| Алерты, дашборд | чарт `charts/observability-extras` | цели Envoy и Envoy Gateway, PrometheusRule, дашборд «Demo app — golden signals», datasource VictoriaLogs |
+| Алерты, дашборды, SLO | чарт `charts/observability-extras` | цели Envoy и Envoy Gateway, PrometheusRule, SLO с burn-rate алертами (unit-тесты `promtool test rules`), дашборды «Demo app — golden signals» и «Gateway / SLO», datasource VictoriaLogs |
+| Доставка алертов | Alertmanager + webhook-получатель в `charts/observability-extras` | каждый алерт — JSON-строкой в лог получателя → Fluentd → VictoriaLogs; Watchdog — сквозная проверка доставки |
+| `kubectl top` | metrics-server | Resource Metrics API; TLS проверяется в обе стороны (сертификаты kubelet подписаны CA кластера) |
+| Образы | `versions.env`, `images.txt` | все образы закреплены `tag@sha256:…`; `make images` — предзагрузка в containerd |
 
 Все версии и контрольные суммы — в одном файле [`versions.env`](versions.env)
 (`make versions` выводит их списком). Kubernetes — **1.36.5**, способ создания
@@ -47,13 +50,17 @@ vmui через тот же Gateway. Повторный запуск ничег�
   (см. замеры ниже).
 - Память (замер через 5+ мин после деплоя):
 
-  | ВМ | занято ОЗУ (`free`) | доступно | рабочий набор подов | крупнейшие |
+  | ВМ | занято ОЗУ (`free`) | доступно | рабочий набор подов (`kubectl top`) | крупнейшие |
   |---|---|---|---|---|
-  | 4 vCPU / 8 ГБ | 3,4 ГБ | 4,6 ГБ | 2,7 ГБ | kube-apiserver 0,86, Grafana 0,45, Prometheus 0,3 ГБ |
-  | 2 vCPU / 4 ГБ | 3,2 ГБ | 0,65 ГБ | 2,8 ГБ | kube-apiserver 0,82, Prometheus 0,29, Grafana 0,21 ГБ (RSS) |
+  | 4 vCPU / 8 ГБ | 3,5 ГБ | 4,3–4,4 ГБ | 2,8–3,3 ГБ | kube-apiserver 0,8, Grafana 0,42–0,58, Prometheus 0,32–0,43, Cilium 0,23–0,42 ГБ |
+  | 2 vCPU / 4 ГБ | 3,4–3,5 ГБ | 0,42–0,48 ГБ | 2,8 ГБ | kube-apiserver 0,89, Grafana 0,39, Prometheus 0,36, Cilium 0,26 ГБ |
 
-  На 2 vCPU / 4 ГБ под нагрузкой (первый деплой) control plane может
-  перезапуститься — развёртывание это переживает.
+  Вторая реплика Envoy, metrics-server и получатель алертов вместе
+  добавляют ~0,1 ГБ (Envoy ~40 МиБ на реплику, metrics-server 20–30 МиБ,
+  получатель ~13 МиБ). На 2 vCPU / 4 ГБ `make verify` проходит, но запас
+  стал меньше (было 0,65 ГБ доступно, стало 0,42–0,48 ГБ); под нагрузкой
+  (первый деплой) control plane может перезапуститься — развёртывание это
+  переживает.
 - Диск. Сразу после деплоя занято ~9,7 ГБ (Ubuntu 2,3 ГБ, образы
   контейнеров 6 ГБ, остальное — etcd, kubelet, кэши). Дальше растут только
   данные, и у каждого есть потолок:
@@ -72,8 +79,8 @@ vmui через тот же Gateway. Повторный запуск ничег�
   адрес в кластер, и если после перезагрузки узел получит другой, control
   plane не поднимется (развёртывание это распознает и подскажет, что делать);
 - пользователь с `sudo` (с паролем или без);
-- прямой доступ в интернет (пакеты, релизы, образы); HTTP(S)-прокси не
-  поддерживается (см. «Ограничения»).
+- доступ в интернет (пакеты, релизы, образы) — напрямую или через
+  HTTP(S)-прокси (см. «Прокси»).
 
 ## Запуск
 
@@ -114,6 +121,47 @@ IP узла определяется автоматически (интерфе�
 `cp ansible/inventory/remote.example.yml ansible/inventory/remote.yml`,
 поправить адрес, затем `make cluster INVENTORY=ansible/inventory/remote.yml`.
 
+### Прокси
+
+Если узел выходит в интернет только через HTTP(S)-прокси, задайте его при
+каждом запуске (без этих переменных про прокси ничего не настраивается, а
+настройки прошлого запуска с прокси удаляются):
+
+```bash
+export HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:3128
+./deploy.sh            # и make verify / make images из той же сессии
+```
+
+Годится любое написание (`HTTP_PROXY` или `http_proxy`); `NO_PROXY` можно
+дополнить своими адресами. Что делается:
+
+| Кто ходит в интернет | Как получает прокси |
+|---|---|
+| `deploy.sh`: apt (`python3-venv`, `make`), pip | переменные окружения (sudo их сохраняет) |
+| Ansible: `get_url` (containerd, runc, helm, helmfile, ключ pkgs.k8s.io), apt | окружение плея; apt — файл `/etc/apt/apt.conf.d/95kubeadm-gateway-proxy` |
+| containerd (все образы, в т. ч. для kubeadm) | systemd drop-in `/etc/systemd/system/containerd.service.d/http-proxy.conf` |
+| helm/helmfile (чарты), `make images` | окружение `make` |
+| Grafana (плагин VictoriaLogs с grafana.com) | переменные `HTTP(S)_PROXY` в поде Grafana (только при заданном прокси) |
+
+kubelet прокси не нужен: образы тянет containerd, а сам kubelet ходит только
+в API-сервер на этом узле. `NO_PROXY` дополняется автоматически
+(`scripts/no-proxy.sh`): `localhost`, `127.0.0.1`, все IPv4-адреса узла,
+адрес API-сервера, сеть подов `10.244.0.0/16`, сервисов `10.96.0.0/12`,
+`.svc`, `.cluster.local`, `demo.local`. `kubeadm init` сам переносит эти
+переменные в манифесты control plane — поэтому кластер, созданный через
+прокси, сохраняет их там и после запусков без прокси. Запросы `make verify`
+к Gateway всегда идут напрямую (`curl --noproxy '*'`). Если вызываете
+`kubectl` руками в сессии с `HTTPS_PROXY`, добавьте в `NO_PROXY` IP узла —
+иначе запрос к API-серверу уйдёт в прокси.
+
+Проверено на стенде: исходящий трафик узла в интернет закрыт nftables,
+открыт только прокси (squid на соседней ВМ); `./deploy.sh` с чистой ОС
+прошёл за 8 мин, `make verify` — все проверки ✓, в `access.log` squid —
+apt (archive.ubuntu.com), pkgs.k8s.io, github.com, get.helm.sh,
+репозитории чартов, реестры (quay.io, registry-1.docker.io, registry.k8s.io,
+docker.angie.software), grafana.com. Повторный запуск без прокси убрал
+настройки (changed=3), следующий — changed=0.
+
 ## Команды
 
 | Команда | Что делает |
@@ -126,7 +174,9 @@ IP узла определяется автоматически (интерфе�
 | `make ui` | адреса UI (Grafana, Prometheus, Alertmanager, vmui) и пароли к ним |
 | `make ca` | выгрузить корневой сертификат CA в `ca.crt` (для `curl --cacert`) |
 | `make destroy FORCE=1` | `kubeadm reset` и очистка следов кластера и Cilium (пакеты и бинарники остаются) |
-| `make lint-deps && make lint` | shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` |
+| `make images` | после `make cluster`: скачать в containerd все образы из `images.txt` (по digest) и образы control plane kubeadm; уже скачанные пропускаются |
+| `make images-list` | пересобрать `images.txt` из отрендеренных манифестов (после смены версий в `versions.env`) |
+| `make lint-deps && make lint` | shellcheck, yamllint, ansible-lint, `helm lint` своих чартов, `promtool check rules` и `promtool test rules`, ruff/black и unit-тесты Python, проверка образов: у каждого образа в отрендеренных манифестах есть digest, `images.txt` актуален |
 
 ## Проверка
 
@@ -147,19 +197,27 @@ make verify        # на узле: адрес, CA и пароль берутс�
 | Шаг | Что проверяется |
 |---|---|
 | 1 | узел `Ready`; все поды `Running` и готовы (перезапуски — не провал); все релизы Helm `deployed` |
-| 2 | Gateway `public`: `Programmed=True`, адрес = IP узла |
+| 2 | Gateway `public`: `Programmed=True`, адрес = IP узла; все HTTPRoute `Accepted` и `ResolvedRefs` (с фильтрами и таймаутами) |
 | 3 | `http://` → 301 на `https://`; `https://app.demo.local/` → 200 и `Hello World!` (сертификат проверяется по CA кластера) |
-| 4 | 200 запросов: доля v2 в коридоре 5–20 % (вес 10 %); `/v2` и `X-Canary: true` → всегда v2 |
-| 5 | `/limited`: из 15 запросов не больше 10 успешных и хотя бы один 429 от rate limit Envoy (заголовок `x-ratelimit-limit: 10`); основной маршрут при этом отвечает 200 |
-| 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API) |
-| 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям) |
+| 4 | 200 запросов: доля v2 в коридоре 5–20 % (вес 10 %); `/v2` и `X-Canary: true` → всегда v2; в ответах `/` и `/v2` есть заголовок `x-gateway-route` с именем правила, внутреннего `x-backend-pod` нет |
+| 5 | `/limited`: из 25 запросов (10 × 2 реплики Envoy + 5) не больше 20 успешных и хотя бы один 429 от rate limit Envoy (заголовок `x-ratelimit-limit: 10`); основной маршрут при этом отвечает 200 |
+| 6 | запрос с уникальным `X-Request-ID` → запись с этим ID в VictoriaLogs и в access-логе Angie, и в access-логе Envoy (LogsQL через API); поддельный `X-Gateway-Route` клиента до Angie не дошёл (заменён фильтром маршрута); копия этого же запроса (зеркало) пришла в web-v2 на теневой порт (`traffic: shadow`) |
+| 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs) в состоянии `up` по API целей (`/api/v1/targets`: сразу после перезагрузки ряды `up` ещё содержат старые точки); счётчик запросов Envoy вырос на трафик шагов 3–6; PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A` (metrics-server); алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
 | 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway не проходят (404); etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для локальной сети (проверяется только с другой машины) |
 
 Повторный запуск в течение минуты корректен: rate limit `/limited`
-считается поминутно, и если лимит ещё исчерпан прошлым запуском, все 15
-запросов получат 429 — это тоже работа лимита (успешных не больше 10),
+считается поминутно, и если лимит ещё исчерпан прошлым запуском, все 25
+запросов получат 429 — это тоже работа лимита (успешных не больше 20),
 а 429 «не от лимита» (без заголовка `x-ratelimit-limit`) засчитывается как
-провал.
+провал. Лимит локальный — у каждой из двух реплик Envoy своё ведро
+(глобальный лимит через отдельный сервис и Redis не делали), поэтому
+проверка шлёт больше, чем пропустят обе реплики вместе, и результат не
+зависит от того, как запросы разошлись по репликам.
+
+Сразу после **обновления** уже работающего кластера (не первой установки)
+Prometheus Operator может пересоздать под Prometheus дважды; на 2 vCPU
+второй перезапуск ждёт завершения первого до ~10 мин, и проверки шага 7
+до этого не проходят — повторите `make verify` через несколько минут.
 
 **С другой машины** (без kubectl) — те же проверки, кроме уровня кластера
 (шаги 1–2 будут пропущены). Нужны `curl`, `jq`, CA и пароль basic auth с
@@ -231,14 +289,40 @@ c https://app.demo.local/v2                     # по пути: всегда v2
 c -H 'X-Canary: true' https://app.demo.local/   # по заголовку: всегда v2
 ```
 
-Rate limit (путь `/limited` — 10 запросов в минуту, дальше 429; основной
-маршрут ограничен 500 запросами в секунду и обычным трафиком не упирается):
+Rate limit (путь `/limited` — 10 запросов в минуту на каждую из двух
+реплик Envoy, дальше 429; основной маршрут ограничен 500 запросами в секунду
+на реплику и обычным трафиком не упирается). Один `curl` держит одно
+соединение, то есть одну реплику:
 
 ```bash
-for i in $(seq 20); do c -o /dev/null -w '%{http_code}\n' https://app.demo.local/limited; done | sort | uniq -c
+c -w '%{http_code}\n' $(for i in $(seq 15); do echo "-o /dev/null https://app.demo.local/limited"; done) | sort | uniq -c
 #  10 200
-#  10 429
+#   5 429
 ```
+
+Заголовки, зеркало и таймауты (стандартные фильтры Gateway API в правилах
+HTTPRoute `app`):
+
+```bash
+c -sI https://app.demo.local/ | grep -iE 'x-gateway-route|x-backend-pod|^server'
+# x-gateway-route: weighted    — добавлен ResponseHeaderModifier;
+# x-backend-pod и server Angie убраны им же
+c -sI https://app.demo.local/v2 | grep -i x-gateway-route    # path-v2
+
+# RequestHeaderModifier: поддельное значение клиента заменено именем правила,
+# RequestMirror: копия запроса ушла в web-v2 на теневой порт 8081
+c -H 'X-Gateway-Route: forged' -H 'X-Request-ID: mirror-1' https://app.demo.local/
+kubectl -n demo logs -l app.kubernetes.io/name=demo-app --tail=-1 | grep mirror-1
+# {..."gateway_route":"weighted","traffic":"app","version":"v1"...}     — ответ клиенту
+# {..."gateway_route":"weighted","traffic":"shadow","version":"v2"...}  — зеркало, ответ отброшен
+
+# таймауты: timeouts.request 10s в HTTPRoute, на попытку — 3s (BackendTrafficPolicy)
+kubectl -n gateway get httproute app -o jsonpath='{.spec.rules[*].timeouts}'; echo
+```
+
+Зеркальные копии Angie считает в отдельной зоне `shadow`, а Envoy — в
+отдельном кластере `…/rule/2-mirror-2`, поэтому ни раскладка canary, ни
+SLO и алерты их не учитывают.
 
 Сквозной идентификатор запроса: Envoy сохраняет присланный `X-Request-ID`
 (или генерирует свой) и передаёт его приложению; он есть и в access-логе
@@ -266,6 +350,8 @@ kill %1
 
 ```bash
 c -o /dev/null -w '%{http_code}\n' https://app.demo.local/broken   # 502
+# для графиков и PromQL: 10 запросов и подождать 60 с (сбор раз в 30 с)
+for i in $(seq 10); do c -o /dev/null https://app.demo.local/broken; done; sleep 60
 ```
 
 ### Веб-интерфейсы мониторинга и логов
@@ -305,7 +391,8 @@ curl хватает `--resolve`, как выше.
 
 kube-prometheus-stack ставит Prometheus Operator, Prometheus (интервал
 сбора 30 с, хранение 3 дня, но не больше 3 ГБ, PVC 4 ГиБ на local-path),
-Alertmanager (1 реплика, без внешних получателей), Grafana, node-exporter и
+Alertmanager (1 реплика, получатель — webhook в кластере, см. «Доставка
+алертов»), Grafana, node-exporter и
 kube-state-metrics. Цели описаны ServiceMonitor/PodMonitor рядом с
 компонентами; Prometheus берёт их из всех namespaces.
 
@@ -338,15 +425,20 @@ $P https://prometheus.demo.local/api/v1/targets | jq -r '.data.activeTargets[] |
 # все цели и их состояние (1 — доступна)
 up
 # запросы к приложению через Envoy, всего и в секунду
-sum(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/.*"})
-sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/.*"}[5m]))
+sum(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"})
+sum(rate(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"}[5m]))
 # canary-раскладка: запросы по версиям (счётчики Angie)
 sum by (version) (rate(angie_http_server_zones_requests_total{namespace="demo", zone="app"}[5m]))
 # p95 времени ответа приложения, мс (гистограмма Envoy)
-histogram_quantile(0.95, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"httproute/gateway/app/.*"}[5m])))
-# доля 5xx и отказы rate limit (429)
-sum(rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~"httproute/gateway/app/.*", envoy_response_code_class="5"}[5m]))
+histogram_quantile(0.95, sum by (le) (rate(envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"}[5m])))
+# доля 5xx за 10 мин и отказы rate limit (429); серия 5xx появляется
+# с первым ответом 5xx (например, после 10 запросов к /broken, см. выше)
+sum(increase(envoy_cluster_upstream_rq_xx{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+", envoy_response_code_class="5"}[10m]))
+  / sum(increase(envoy_cluster_upstream_rq_total{envoy_cluster_name=~"httproute/gateway/app/rule/[0-9]+"}[10m]))
 sum(increase(envoy_http_local_rate_limit_rate_limited[1h]))
+# SLO: доля ошибок за 1 ч и скорость расхода бюджета (1 = ровно за 30 дней)
+slo:sli_error:ratio_rate1h
+slo:sli_error:ratio_rate1h / on (slo) slo:error_budget:ratio
 # Gateway запрограммирован (1 = True)
 gatewayapi_gateway_status{type="Programmed"}
 ```
@@ -354,7 +446,14 @@ gatewayapi_gateway_status{type="Programmed"}
 Чтобы увидеть рост счётчика: выполнить первый запрос, отправить пачку
 запросов (цикл из раздела «Canary»), подождать 30 с и повторить.
 
-**Grafana.** Дашборд **Demo app — golden signals** (папка General): запросы
+**Grafana.** Дашборд **Gateway / SLO**: SLI доступности и задержки за
+выбранный интервал, цель, остаток бюджета ошибок (по темпу последних 3 дней
+— столько хранит Prometheus), burn rate по окнам 5 мин / 1 ч / 6 ч / 1 д /
+3 д с порогами алертов, сработавшие SLO-алерты; RPS, коды ответов, p95 и
+p99 по каждому правилу каждого маршрута (включая зеркало), 429 по репликам
+Envoy, число живых реплик. Все запросы панелей проверены на стенде через API
+Prometheus (данные есть после трафика `make verify`; окно 5 мин без трафика
+даёт пустую линию — делить нечего). Дашборд **Demo app — golden signals** (папка General): запросы
 в секунду, доля 5xx, p50/p95/p99 времени ответа, раскладка v1/v2, 429,
 готовые реплики, CPU и память подов приложения, число строк логов
 access/error и сами логи из VictoriaLogs. Рядом — стандартные дашборды
@@ -376,8 +475,45 @@ VictoriaLogs. Источник данных VictoriaLogs — плагин
 | `GatewayProxyDown` | ни один Envoy-прокси не отвечает Prometheus, 2 мин |
 | `FluentdDown`, `FluentdMissing` | под Fluentd не отвечает 5 мин; целей Fluentd нет совсем 5 мин |
 | `FluentdNoOutput` | Fluentd читает логи, а VictoriaLogs 5 мин не принимает ни одной строки (`vl_rows_ingested_total` не растёт или VictoriaLogs недоступна) — судим по принимающей стороне: счётчик записей Fluentd растёт и на неудачных попытках |
-| `FluentdBufferErrors`, `FluentdBufferAlmostFull` | ретраи/ошибки отправки; буфер заполнен больше чем на 80 % |
+| `FluentdBufferErrors`, `FluentdBufferAlmostFull` | ретраи/ошибки отправки за 10 мин; буфер заполнен больше чем на 80 % |
 | `EtcdMetricsMissing` | метрики etcd (через прокси) не собираются 5 мин |
+| `AppAvailabilityBudgetBurnFast` / `…Slow` | SLO 99,9 % ответов без 5xx (30 дней): бюджет ошибок тратится в 14,4× быстрее за 1 ч и 5 мин или в 6× за 6 ч и 30 мин (critical); в 3× за 1 д и 2 ч или в 1× за 3 д и 6 ч (warning) — схема multi-window multi-burn-rate из Google SRE Workbook |
+| `AppLatencyBudgetBurnFast` / `…Slow` | SLO 99 % запросов быстрее 250 мс (время ответа приложения по гистограмме Envoy), те же окна и пороги |
+
+SLO считаются по записанным правилам `slo:sli_error:ratio_rate<окно>`
+(5m … 3d) только для маршрута приложения (зеркало и UI не входят). Логику
+алертов проверяют unit-тесты `tests/prometheus/slo.test.yaml`
+(`promtool test rules` в `make lint`): 5 % ошибок → fast и slow, 0,5 % →
+только slow, ошибки зеркала и других маршрутов → ничего, нет трафика →
+ничего, 20 % медленных запросов → fast по задержке.
+
+`FluentdBufferErrors` смотрит на рост счётчиков ретраев за 10 минут, поэтому
+после простоя VictoriaLogs или перезагрузки узла он может гореть ещё до
+~10 мин после восстановления, хотя логи уже доставлены (буфер
+дозагрузился) — это ожидаемо.
+
+**Доставка алертов.** Alertmanager отправляет все алерты (кроме служебного
+`InfoInhibitor`) в webhook-получатель внутри кластера — Deployment
+`monitoring/alert-receiver`: скрипт на стандартной библиотеке Python
+(`charts/observability-extras/files/alert_receiver.py`, unit-тесты в
+`tests/`), образ `python` по digest, Pod Security `restricted`, принимать
+запросы разрешено только от Alertmanager (NetworkPolicy). Каждый алерт он
+пишет одной JSON-строкой в stdout, Fluentd разбирает её в поля
+(`alertname`, `status`, `severity`, `labels.*`), и алерты ищутся в
+VictoriaLogs рядом с логами. Watchdog (горит всегда) уходит туда каждые
+~5 мин — это сквозная проверка цепочки Prometheus → Alertmanager →
+получатель → Fluentd → VictoriaLogs, её делает `make verify`:
+
+```logsql
+_time:15m kubernetes.container_name:receiver alertname:Watchdog
+kubernetes.container_name:receiver status:firing severity:critical
+```
+
+**`kubectl top`.** metrics-server (kube-system) отдаёт Resource Metrics
+API: `kubectl top nodes`, `kubectl top pods -A`. Флага
+`--kubelet-insecure-tls` нет: kubelet получает серверный сертификат от CA
+кластера (`serverTLSBootstrap`, см. «Особенности»), а сертификат самого
+metrics-server выпускает cert-manager, и API-сервер его проверяет.
 
 Плюс стандартные правила kube-prometheus-stack (узел, поды, etcd, API-сервер,
 controller-manager, scheduler — `KubeAPIDown`, `KubeControllerManagerDown`,
@@ -569,7 +705,8 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 
   | Куда | Откуда |
   |---|---|
-  | приложение `demo`, порт 8080 | Envoy-прокси Gateway |
+  | приложение `demo`, порты 8080 и 8081 (зеркало) | Envoy-прокси Gateway |
+  | получатель алертов `alert-receiver` 8080 | Alertmanager |
   | метрики всех компонентов (Angie 9113, Envoy 19001, cert-manager 9402, Fluentd 24231, VictoriaLogs 9428, всё в `monitoring`) | Prometheus |
   | Prometheus 9090, Alertmanager 9093 | Grafana, Envoy-прокси (UI) |
   | Grafana 3000 | Envoy-прокси (UI) |
@@ -658,6 +795,46 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   `values/ui-routes.yaml.gotmpl`: `basicAuth: true` включает защиту,
   `allow` — какие методы и пути пропускать). Публикация приложения от него
   не зависит: релиз `gateway` не ждёт мониторинга и логов.
+- **Сертификаты kubelet от CA кластера.** По умолчанию kubelet подписывает
+  свой HTTPS-сертификат сам, и проверить его нельзя (отсюда популярный
+  `--kubelet-insecure-tls` у metrics-server). Здесь в KubeletConfiguration
+  включён `serverTLSBootstrap: true`: kubelet запрашивает сертификат у CA
+  кластера (CSR, signer `kubernetes.io/kubelet-serving`). Такие запросы
+  Kubernetes сам не одобряет — запрос доказывает только, какой узел его
+  прислал, но не то, что имена в нём принадлежат узлу. Одобряет роль
+  `kubeadm_init` (`tasks/kubelet_serving.yml`), предварительно проверив, что
+  в сертификате только имя этого узла и его IP; при каждом `make deploy` —
+  ещё раз (сертификат живёт год, kubelet заранее просит новый). Для уже
+  созданного кластера та же задача включает настройку на узле и в ConfigMap
+  `kube-system/kubelet-config` (её берут `kubeadm upgrade` и новые узлы) и
+  перезапускает kubelet — поды при этом не останавливаются. Отдельный
+  контроллер-одобритель (kubelet-csr-approver) не ставили: это ещё один под
+  на узле, где памяти впритык, а узел один и одобрение при деплое покрывает
+  и его, и будущие `add-worker`.
+- **Образы по digest.** Каждый образ задан как `tag@sha256:…` (digest
+  мультиархитектурного индекса): в `versions.env` — `<ИМЯ>_DIGEST` для
+  образов, чей тег уже есть там как версия, и `<ИМЯ>_IMAGE` (тег и digest)
+  для образов, чей тег — значение по умолчанию чарта. Где чарт умеет поле
+  digest/sha (cert-manager, kube-prometheus-stack, Grafana,
+  kube-state-metrics, node-exporter), задаётся оно; где нет
+  (local-path-provisioner, VictoriaLogs, metrics-server, Envoy Gateway) —
+  `tag@digest` в поле тега или образа. Чарт Cilium сам прописывает digest
+  своих образов. Исключение — образы control plane kubeadm (`kube-apiserver`,
+  `etcd`, `coredns`, `pause`): kubeadm берёт их по тегу версии Kubernetes и
+  digest задать не позволяет. `make lint` рендерит все релизы
+  (`helmfile template` без кластера) и падает, если хоть у одного образа —
+  включая встроенные в аргументы операторов и конфиги, например образ
+  config-reloader и shutdown-manager Envoy, — нет digest или если
+  `images.txt` устарел. `make images` скачивает список в containerd
+  (`ctr -n k8s.io images pull` по `repo@sha256`, ровно под теми именами, что
+  ищет kubelet), повторяя загрузку при сбое; образы, которые только
+  упоминаются, но не запускаются (rate limit Envoy Gateway, ACME-solver
+  cert-manager, Thanos), закреплены, но не скачиваются.
+- **Envoy в двух репликах.** EnvoyProxy: `replicas: 2`, PodDisruptionBudget
+  `minAvailable: 1`, rolling update `maxUnavailable: 0` / `maxSurge: 1`,
+  topologySpread по узлам (`ScheduleAnyway`: на одном узле обе реплики
+  рядом). Обе стоят за одним Service LoadBalancer (Cilium node IPAM), адрес
+  Gateway — по-прежнему IP узла.
 - **Приложение без root.** Angie работает от пользователя образа (uid 100),
   корневая ФС только для чтения (pid и временные файлы — в emptyDir),
   capabilities сброшены, seccomp `RuntimeDefault`; порты 8080 (HTTP) и 9113
@@ -666,9 +843,9 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
 
 ## Ограничения
 
-- **Прокси не поддерживается.** Узлу нужен прямой доступ в интернет: apt,
-  релизы GitHub, Helm-репозитории и реестры образов. Переменные
-  `HTTP(S)_PROXY` не прокидываются ни в containerd, ни в kubelet, ни в Ansible.
+- **Rate limit локальный, на реплику Envoy**: при двух репликах Gateway
+  пропускает до 2× лимита. Общий лимит потребовал бы сервис rate limit
+  Envoy Gateway и Redis — не делали.
 - **Один узел, IPv4, amd64.** Адрес API-сервера (IP узла) после создания
   кластера не меняется, см. «Запуск».
 - **Плагин VictoriaLogs для Grafana** скачивается с grafana.com при каждом
@@ -677,8 +854,10 @@ kubectl -n demo run np-check --rm -i --restart=Never --image=docker.io/curlimage
   смотрятся в vmui и через API.
 - **Хранилище — local-path** (каталог на узле): метрики и логи переживают
   перезапуск подов, но не потерю узла.
-- **Алерты никуда не отправляются**: в Alertmanager нет получателей, алерты
-  видны в UI Prometheus, Alertmanager и Grafana.
+- **Алерты не уходят за пределы кластера**: единственный получатель —
+  webhook, который пишет их в лог (VictoriaLogs); почты, мессенджеров и
+  дежурств нет. SLO-бюджет за 30 дней оценивается по темпу последних 3 дней:
+  Prometheus хранит 3 дня метрик.
 - **Сетевые политики и закрытие портов метрик рассчитаны на один узел.**
   Вебхуки и пробы kubelet проходят как трафик самого узла; на нескольких
   узлах понадобятся правила для соседних узлов (`ipBlock` их адресов), а в

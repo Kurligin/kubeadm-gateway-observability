@@ -45,3 +45,7 @@ scheduler:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
+# The kubelet asks the cluster CA for its HTTPS serving certificate (CSR,
+# approved by this role) instead of signing one itself, so that clients
+# such as metrics-server can verify it. Renewed the same way.
+serverTLSBootstrap: true

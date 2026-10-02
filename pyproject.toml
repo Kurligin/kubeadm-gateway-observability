@@ -1,0 +1,22 @@
+# Settings of the Python linters (`make lint`): the alert receiver
+# (charts/observability-extras/files), scripts/images.py and their tests.
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, annotations (type hints
+# are required), naming, builtins shadowing, security.
+select = ["E", "W", "F", "I", "UP", "B", "ANN", "N", "A", "S"]
+ignore = [
+  # Parsed JSON/YAML documents are dynamically typed by nature.
+  "ANN401",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests talk to a server on 127.0.0.1 with urllib.
+"tests/*" = ["S310"]

@@ -1,6 +1,7 @@
 {{- $app := .Values.app }}
 {{- $stable := dict "service" $app.stable.service "namespace" $app.namespace "port" $app.port }}
 {{- $canary := dict "service" $app.canary.service "namespace" $app.namespace "port" $app.port }}
+{{- $mirror := dict "service" $app.mirror.service "namespace" $app.namespace "port" $app.port }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -18,7 +19,10 @@ spec:
         - path:
             type: PathPrefix
             value: {{ $app.canaryPath }}
-      {{- include "gateway.stripPrefix" . | nindent 6 }}
+      filters:
+        {{- include "gateway.stripPrefixFilter" . | nindent 8 }}
+        {{- include "gateway.headerFilters" (dict "root" . "rule" "path-v2") | nindent 8 }}
+      {{- include "gateway.timeouts" . | nindent 6 }}
       backendRefs:
         {{- include "gateway.backendRef" $canary | nindent 8 }}
     # Header-based: opt in to the canary version.
@@ -30,13 +34,30 @@ spec:
             - type: Exact
               name: {{ $app.canaryHeader.name }}
               value: {{ $app.canaryHeader.value | quote }}
+      filters:
+        {{- include "gateway.headerFilters" (dict "root" . "rule" "header-canary") | nindent 8 }}
+      {{- include "gateway.timeouts" . | nindent 6 }}
       backendRefs:
         {{- include "gateway.backendRef" $canary | nindent 8 }}
-    # Weighted canary for everything else.
+    # Weighted canary for everything else, with a shadow copy of every
+    # request sent to the mirror Service (its answer is discarded).
     - matches:
         - path:
             type: PathPrefix
             value: /
+      filters:
+        {{- include "gateway.headerFilters" (dict "root" . "rule" "weighted") | nindent 8 }}
+        {{- if $app.mirror.enabled }}
+        - type: RequestMirror
+          requestMirror:
+            backendRef:
+              group: ""
+              kind: Service
+              name: {{ $mirror.service }}
+              namespace: {{ $mirror.namespace }}
+              port: {{ $mirror.port }}
+        {{- end }}
+      {{- include "gateway.timeouts" . | nindent 6 }}
       backendRefs:
         {{- include "gateway.backendRef" (merge (dict "weight" $app.stable.weight) $stable) | nindent 8 }}
         {{- include "gateway.backendRef" (merge (dict "weight" $app.canary.weight) $canary) | nindent 8 }}
@@ -58,6 +79,9 @@ spec:
         - path:
             type: PathPrefix
             value: {{ $app.limited.path }}
-      {{- include "gateway.stripPrefix" . | nindent 6 }}
+      filters:
+        {{- include "gateway.stripPrefixFilter" . | nindent 8 }}
+        {{- include "gateway.headerFilters" (dict "root" . "rule" "limited") | nindent 8 }}
+      {{- include "gateway.timeouts" . | nindent 6 }}
       backendRefs:
         {{- include "gateway.backendRef" $stable | nindent 8 }}

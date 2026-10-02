@@ -30,12 +30,45 @@ parentRefs:
   {{- end }}
 {{- end }}
 
-{{/* URLRewrite filter: strip the matched prefix, the backend sees "/". */}}
-{{- define "gateway.stripPrefix" -}}
-filters:
-  - type: URLRewrite
-    urlRewrite:
-      path:
-        type: ReplacePrefixMatch
-        replacePrefixMatch: /
+{{/* URLRewrite filter (list item): strip the matched prefix, the backend sees "/". */}}
+{{- define "gateway.stripPrefixFilter" -}}
+- type: URLRewrite
+  urlRewrite:
+    path:
+      type: ReplacePrefixMatch
+      replacePrefixMatch: /
+{{- end }}
+
+{{/*
+Request and response header filters (list items) of an application rule.
+Arguments: dict "root" $ "rule" <rule name, the value of the route header>
+*/}}
+{{- define "gateway.headerFilters" -}}
+{{- $headers := .root.Values.app.headers -}}
+- type: RequestHeaderModifier
+  requestHeaderModifier:
+    set:
+      - name: {{ $headers.route }}
+        value: {{ .rule | quote }}
+- type: ResponseHeaderModifier
+  responseHeaderModifier:
+    set:
+      - name: {{ $headers.route }}
+        value: {{ .rule | quote }}
+    {{- with $headers.removeFromResponse }}
+    remove:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}
+
+{{/* HTTPRoute rule timeouts. */}}
+{{- define "gateway.timeouts" -}}
+timeouts:
+  request: {{ .Values.app.timeouts.request }}
+{{- end }}
+
+{{/* Labels Envoy Gateway puts on the proxy pods of this Gateway. */}}
+{{- define "gateway.proxySelector" -}}
+gateway.envoyproxy.io/owning-gateway-name: {{ .Values.gateway.name }}
+gateway.envoyproxy.io/owning-gateway-namespace: {{ .Release.Namespace }}
 {{- end }}

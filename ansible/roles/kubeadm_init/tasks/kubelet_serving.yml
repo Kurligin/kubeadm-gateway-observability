@@ -1,0 +1,96 @@
+---
+# The kubelet serves its API (logs, exec, metrics) over HTTPS. By default it
+# signs that certificate itself, so nobody can verify it; metrics-server
+# would need --kubelet-insecure-tls. With serverTLSBootstrap the kubelet
+# requests the certificate from the cluster CA instead (signer
+# kubernetes.io/kubelet-serving). Kubernetes never approves these requests
+# on its own: a request only proves which node sent it, not that the names
+# in it belong to that node. They are approved here, after checking that
+# the certificate would name only this node and its addresses.
+#
+# New clusters get serverTLSBootstrap from the kubeadm configuration; for a
+# cluster created before it existed, the kubelet configuration on the node
+# and the cluster-wide copy kubeadm uses for upgrades and joining nodes
+# (ConfigMap kube-system/kubelet-config) are updated in place. Restarting
+# the kubelet does not stop running pods.
+#
+# The certificate is valid for one year; the kubelet requests a new one
+# before it expires, and every `make deploy` approves pending requests.
+
+- name: Enable serverTLSBootstrap in the kubelet configuration of this node
+  ansible.builtin.lineinfile:
+    path: "{{ kubeadm_init_kubelet_config }}"
+    regexp: '^serverTLSBootstrap:'
+    line: 'serverTLSBootstrap: true'
+  notify: Restart kubelet
+
+# The certificate request below needs the restarted kubelet.
+- name: Apply a pending kubelet restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable serverTLSBootstrap in the cluster-wide kubelet configuration
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      config="$(kubectl --namespace kube-system get configmap kubelet-config --output json)"
+      if jq -e '.data.kubelet | split("\n") | any(. == "serverTLSBootstrap: true")' <<<"${config}" >/dev/null; then
+        echo unchanged
+        exit 0
+      fi
+      jq '.data.kubelet |= ((split("\n") | map(select(startswith("serverTLSBootstrap:") | not)) | join("\n") | rtrimstr("\n"))
+        + "\nserverTLSBootstrap: true\n")' <<<"${config}" | kubectl replace --filename - >/dev/null
+      echo changed
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_kubelet_configmap
+  changed_when: kubeadm_init_kubelet_configmap.stdout == 'changed'
+
+- name: Look for the serving certificate of the kubelet
+  ansible.builtin.stat:
+    path: "{{ kubeadm_init_kubelet_serving_cert }}"
+  register: kubeadm_init_serving_cert
+
+# Approves every pending kubelet-serving request of this node whose names
+# are only this node's name and IP addresses; anything else is left
+# pending and reported. Repeated until the kubelet has its certificate
+# (the request appears a moment after the kubelet starts).
+- name: Approve the kubelet serving certificate requests of this node
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      node={{ kubeadm_init_node_name | quote }}
+      allowed=" {{ (ansible_facts['all_ipv4_addresses'] + ansible_facts['all_ipv6_addresses']) | join(' ') }} "
+      approved=0
+      for csr in $(kubectl get csr --output json | jq -r --arg user "system:node:${node}" '.items[]
+          | select(.spec.signerName == "kubernetes.io/kubelet-serving" and .spec.username == $user)
+          | select((.status.conditions // []) | length == 0) | .metadata.name'); do
+        sans="$(kubectl get csr "${csr}" --output jsonpath='{.spec.request}' | base64 -d |
+          openssl req -noout -ext subjectAltName | tail -n +2 | tr ',' '\n' | sed 's/^ *//')"
+        valid=true
+        while read -r san; do
+          case "${san}" in
+            "DNS:${node}" | "") ;;
+            "IP Address:"*) [[ ${allowed} == *" ${san#IP Address:} "* ]] || valid=false ;;
+            *) valid=false ;;
+          esac
+        done <<<"${sans}"
+        if [[ ${valid} == true ]]; then
+          kubectl certificate approve "${csr}" >/dev/null
+          approved=$((approved + 1))
+        else
+          echo "left pending: ${csr} asks for names that are not this node's: ${sans//$'\n'/, }" >&2
+        fi
+      done
+      echo "approved ${approved}"
+      [[ -s {{ kubeadm_init_kubelet_serving_cert | quote }} ]]
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_csr_approval
+  until: kubeadm_init_csr_approval.rc == 0
+  retries: "{{ kubeadm_init_serving_cert_retries }}"
+  delay: 5
+  changed_when: >-
+    not kubeadm_init_serving_cert.stat.exists
+    or kubeadm_init_csr_approval.stdout != 'approved 0'

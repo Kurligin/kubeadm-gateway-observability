@@ -3,6 +3,8 @@ image:
   repository: docker.angie.software/angie
   # Required; set from versions.env (ANGIE_VERSION) by helmfile.
   tag: ""
+  # sha256:<digest>, pins the image (versions.env ANGIE_DIGEST).
+  digest: ""
   pullPolicy: IfNotPresent
 
 # One Deployment + Service + ConfigMap per entry, same image, different config.
@@ -11,12 +13,18 @@ versions:
     version: v1
   - name: web-v2
     version: v2
+    # Also gets a "<name>-shadow" Service: the target of the gateway's
+    # request mirroring (copies of live traffic, responses discarded).
+    shadow: true
 
 replicaCount: 2
 
 ports:
   # Unprivileged ports: the container runs as a non-root user.
   http: 8080
+  # Same content as "http"; requests arriving here are mirrored copies and
+  # are counted (zone "shadow") and logged (traffic=shadow) apart.
+  shadow: 8081
   metrics: 9113
 
 service:

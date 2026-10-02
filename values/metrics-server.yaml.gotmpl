@@ -1,0 +1,33 @@
+# Resource metrics API (metrics.k8s.io) for `kubectl top` and autoscalers.
+image:
+  # The chart has no digest field; tag@digest pins the image.
+  tag: {{ printf "v%s@%s" .Values.versions.METRICS_SERVER_VERSION .Values.versions.METRICS_SERVER_DIGEST | quote }}
+
+# TLS is verified in both directions, no --kubelet-insecure-tls:
+# - metrics-server -> kubelet: the kubelet serving certificates are signed
+#   by the cluster CA (kubelet serverTLSBootstrap, CSRs approved by the
+#   Ansible role kubeadm_init) and checked against the cluster CA of the
+#   ServiceAccount, by the node IP the certificate contains;
+# - API server -> metrics-server: serving certificate from the demo CA
+#   (cert-manager), whose CA cainjector puts into the APIService.
+defaultArgs:
+  - --cert-dir=/tmp
+  - --kubelet-preferred-address-types=InternalIP
+  - --kubelet-use-node-status-port
+  - --metric-resolution=15s
+tls:
+  type: cert-manager
+  certManager:
+    existingIssuer:
+      enabled: true
+      kind: ClusterIssuer
+      name: demo-ca
+apiService:
+  insecureSkipTLSVerify: false
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 48Mi
+  limits:
+    memory: 128Mi

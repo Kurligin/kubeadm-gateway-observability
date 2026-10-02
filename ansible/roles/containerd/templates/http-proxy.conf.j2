@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Proxy of the deployment for image pulls; removed by the next deployment
+# that runs without one.
+[Service]
+Environment="HTTP_PROXY={{ proxy_http }}" "HTTPS_PROXY={{ proxy_https }}" "NO_PROXY={{ proxy_no_proxy }}"

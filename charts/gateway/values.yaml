@@ -15,11 +15,28 @@ envoyProxy:
   # Cilium (kube-proxy replacement) serves the LoadBalancer address itself;
   # no NodePorts are opened on the node.
   allocateLoadBalancerNodePorts: false
-  replicas: 1
+  # Envoy image; set from versions.env (ENVOY_PROXY_IMAGE, tag@digest) by
+  # helmfile. Empty: the default of the Envoy Gateway release.
+  image: ""
+  # Two proxies behind the LoadBalancer Service: one can be restarted,
+  # evicted or rolled out while the other keeps serving.
+  replicas: 2
+  podDisruptionBudget:
+    minAvailable: 1
+  # A new proxy is started and ready before an old one is stopped.
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+  # Spread the proxies over nodes when there are several; on a single node
+  # both run there (ScheduleAnyway).
+  topologySpread:
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 96Mi
     limits:
       memory: 512Mi
 
@@ -51,9 +68,34 @@ app:
   canaryHeader:
     name: X-Canary
     value: "true"
-  # Applied to the whole application route.
+  # Gateway API timeout of every rule of the application routes
+  # (HTTPRoute spec.rules[].timeouts.request, standard channel): the whole
+  # request, retries included. timeouts.backendRequest is not set: Envoy
+  # Gateway 1.9 turns it into the same route-level timeout (overriding
+  # "request"), not into a per-attempt one; the per-attempt timeout is
+  # trafficPolicy.retry.perRetryTimeout below.
+  timeouts:
+    request: 10s
+  # Request and response header filters of every rule (standard
+  # RequestHeaderModifier / ResponseHeaderModifier).
+  headers:
+    # Set to the name of the matched rule on the request (the backend logs
+    # it; a value sent by the client is overwritten) and on the response.
+    route: X-Gateway-Route
+    # Internal headers of the backend, removed from every response.
+    removeFromResponse:
+      - X-Backend-Pod
+      - Server
+  # Shadow traffic (standard RequestMirror filter): every request of the
+  # weighted rule is also sent to this Service; its response is discarded,
+  # the client only ever sees the answer of the primary backend. The
+  # Service (demo-app chart) leads to web-v2 on a separate port, so the
+  # copies are counted and logged apart from live traffic.
+  mirror:
+    enabled: true
+    service: web-v2-shadow
+  # Envoy Gateway policies applied to the whole application route.
   trafficPolicy:
-    requestTimeout: 10s
     connectTimeout: 2s
     # Envoy retries regardless of the HTTP method, so only failures where the
     # request provably never reached the application are retried: that is

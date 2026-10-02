@@ -50,6 +50,8 @@ http {
         '"user_agent":"$http_user_agent",'
         '"bytes":$body_bytes_sent,'
         '"host":"$host",'
+        '"gateway_route":"$http_x_gateway_route",'
+        '"traffic":"$traffic_kind",'
         '"version":"{{ .item.version }}",'
         '"pod":"$hostname"'
     '}';
@@ -57,19 +59,33 @@ http {
 
     keepalive_timeout 65;
 
-    # Request counters are kept per key: kubelet probes ("probes") apart
-    # from application traffic ("app"), see status_zone below.
+    # Copies of requests mirrored by the gateway arrive on the shadow port
+    # (Service <name>-shadow).
+    map $server_port $traffic_kind {
+        {{ .root.Values.ports.shadow }}  shadow;
+        default app;
+    }
+
+    # Request counters are kept per key: kubelet probes ("probes") and
+    # mirrored copies ("shadow") apart from application traffic ("app"),
+    # see status_zone below.
     map $uri $status_zone_key {
         /healthz probes;
-        default  app;
+        default  $traffic_kind;
     }
 
     server {
         listen {{ .root.Values.ports.http }} default_server;
+        listen {{ .root.Values.ports.shadow }};
         server_name _;
         # Request and response counters for /p8s: http server zones "app"
-        # (application traffic) and "probes" (kubelet health checks).
-        status_zone $status_zone_key zone=server:2;
+        # (application traffic), "shadow" (mirrored copies) and "probes"
+        # (kubelet health checks).
+        status_zone $status_zone_key zone=server:3;
+
+        # Internal detail for operators; the gateway removes it from the
+        # responses it sends to clients (ResponseHeaderModifier).
+        add_header X-Backend-Pod $hostname always;
 
         location = /healthz {
             access_log off;

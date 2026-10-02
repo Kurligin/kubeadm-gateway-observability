@@ -42,13 +42,16 @@ spec:
               {{- include "demo-app.selectorLabels" $ctx | nindent 14 }}
       containers:
         - name: angie
-          image: "{{ $.Values.image.repository }}:{{ $tag }}"
+          image: "{{ $.Values.image.repository }}:{{ $tag }}{{ with $.Values.image.digest }}@{{ . }}{{ end }}"
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
           command: ["angie"]
           args: ["-c", "/etc/angie/k8s/angie.conf", "-g", "daemon off;"]
           ports:
             - name: http
               containerPort: {{ $.Values.ports.http }}
+              protocol: TCP
+            - name: shadow
+              containerPort: {{ $.Values.ports.shadow }}
               protocol: TCP
             - name: metrics
               containerPort: {{ $.Values.ports.metrics }}

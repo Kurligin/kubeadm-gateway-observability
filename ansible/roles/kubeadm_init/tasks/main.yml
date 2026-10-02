@@ -84,3 +84,6 @@
     KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
   when: k8s_single_node and kubeadm_init_node_lb_excluded | bool
   changed_when: true
+
+- name: Give the kubelet a serving certificate signed by the cluster CA
+  ansible.builtin.include_tasks: kubelet_serving.yml

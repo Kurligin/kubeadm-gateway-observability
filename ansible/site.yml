@@ -4,6 +4,9 @@
 - name: Prepare the node and bootstrap the Kubernetes control plane
   hosts: control_plane
   become: true
+  # Proxy for downloads and commands, only if one is configured (see
+  # group_vars/all/main.yml); empty otherwise.
+  environment: "{{ proxy_env }}"
   roles:
     - role: node_prep
     - role: node_firewall

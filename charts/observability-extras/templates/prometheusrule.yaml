@@ -1,4 +1,4 @@
-{{- $app := printf "envoy_cluster_name=~\"%s.*\"" .Values.envoyGateway.appClusterPrefix }}
+{{- $app := printf "envoy_cluster_name=~\"%s\"" .Values.envoyGateway.appClusterRegex }}
 {{- $deployments := join "|" .Values.app.deployments }}
 {{- $a := .Values.alerts }}
 apiVersion: monitoring.coreos.com/v1
@@ -42,7 +42,7 @@ spec:
             summary: "More than {{ mulf $a.errorRatio 100 }}% of application responses are 5xx"
             description: >-
               {{ "{{ $value | humanizePercentage }}" }} of the requests to the application route
-              (Envoy clusters {{ .Values.envoyGateway.appClusterPrefix }}*) ended with a 5xx
+              (Envoy clusters {{ .Values.envoyGateway.appClusterRegex }}) ended with a 5xx
               response over the last 5 minutes. See the "Demo app — golden signals"
               dashboard and the Angie error log in VictoriaLogs.
 

@@ -2,3 +2,6 @@ domain: {{ .Values.domain | quote }}
 
 gateway:
   name: {{ .Values.gateway.name | quote }}
+
+envoyProxy:
+  image: {{ .Values.versions.ENVOY_PROXY_IMAGE | quote }}

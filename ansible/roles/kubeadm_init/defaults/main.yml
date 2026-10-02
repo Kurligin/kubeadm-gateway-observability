@@ -17,3 +17,10 @@ kubeadm_init_etcd_dir: /var/lib/etcd
 # How long an existing control plane may take to answer (e.g. after a reboot):
 # retries x 5 seconds.
 kubeadm_init_api_wait_retries: 36
+# Kubelet configuration written by kubeadm and the serving certificate the
+# kubelet gets from the cluster CA (serverTLSBootstrap).
+kubeadm_init_kubelet_config: /var/lib/kubelet/config.yaml
+kubeadm_init_kubelet_serving_cert: /var/lib/kubelet/pki/kubelet-server-current.pem
+# How long to wait for the kubelet's serving certificate request:
+# retries x 5 seconds.
+kubeadm_init_serving_cert_retries: 36

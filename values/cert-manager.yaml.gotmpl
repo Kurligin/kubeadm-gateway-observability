@@ -4,6 +4,16 @@ crds:
   enabled: true
   keep: true
 
+# Images pinned by digest (the tags default to the chart version).
+image:
+  digest: {{ .Values.versions.CERT_MANAGER_CONTROLLER_DIGEST | quote }}
+acmesolver:
+  image:
+    digest: {{ .Values.versions.CERT_MANAGER_ACMESOLVER_DIGEST | quote }}
+startupapicheck:
+  image:
+    digest: {{ .Values.versions.CERT_MANAGER_STARTUPAPICHECK_DIGEST | quote }}
+
 prometheus:
   enabled: true
   servicemonitor:
@@ -17,6 +27,8 @@ resources:
     memory: 256Mi
 
 webhook:
+  image:
+    digest: {{ .Values.versions.CERT_MANAGER_WEBHOOK_DIGEST | quote }}
   resources:
     requests:
       cpu: 10m
@@ -25,6 +37,8 @@ webhook:
       memory: 128Mi
 
 cainjector:
+  image:
+    digest: {{ .Values.versions.CERT_MANAGER_CAINJECTOR_DIGEST | quote }}
   resources:
     requests:
       cpu: 10m

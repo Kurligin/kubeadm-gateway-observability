@@ -1,6 +1,6 @@
 {{- /* Services referenced by routes, grouped by namespace. */}}
 {{- $grants := dict }}
-{{- $appServices := list .Values.app.stable.service .Values.app.canary.service }}
+{{- $appServices := list .Values.app.stable.service .Values.app.canary.service .Values.app.mirror.service }}
 {{- $_ := set $grants .Values.app.namespace $appServices }}
 {{- range $namespace, $services := $grants }}
 ---

@@ -1,5 +1,6 @@
 image:
   tag: {{ printf "%s-minimal" .Values.versions.ANGIE_VERSION | quote }}
+  digest: {{ .Values.versions.ANGIE_DIGEST | quote }}
 
 serviceMonitor:
   enabled: {{ .Values.serviceMonitors }}

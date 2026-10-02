@@ -1,5 +1,8 @@
+alertReceiver:
+  image: {{ .Values.versions.ALERT_RECEIVER_IMAGE | quote }}
+
 envoyGateway:
-  appClusterPrefix: {{ printf "httproute/%s/app/" .Values.gateway.namespace | quote }}
+  appClusterRegex: {{ printf "httproute/%s/app/rule/[0-9]+" .Values.gateway.namespace | quote }}
 
 gateway:
   namespace: {{ .Values.gateway.namespace | quote }}

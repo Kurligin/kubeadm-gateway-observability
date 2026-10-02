@@ -1,4 +1,0 @@
----
-# CRDs are applied by scripts/apply-gateway-crds.sh (see helmfile).
-crds:
-  enabled: false

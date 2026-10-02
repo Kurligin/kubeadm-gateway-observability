@@ -1,9 +1,11 @@
 ---
 image:
-  repository: fluent/fluentd-kubernetes-daemonset
+  repository: docker.io/fluent/fluentd-kubernetes-daemonset
   # Required; set from versions.env (FLUENTD_IMAGE_TAG) by helmfile. The
   # "debian-forward" variant has every plugin the configuration uses.
   tag: ""
+  # sha256:<digest>, pins the image (versions.env FLUENTD_DIGEST).
+  digest: ""
   pullPolicy: IfNotPresent
 
 # Where the logs go: VictoriaLogs JSON lines API.
@@ -26,6 +28,8 @@ jsonLogs:
   - kube.var.log.containers.*_demo_angie-*.log
   # Envoy access log (Gateway proxies).
   - kube.var.log.containers.*_envoy-gateway-system_envoy-*.log
+  # Alerts written by the Alertmanager webhook receiver.
+  - kube.var.log.containers.alert-receiver-*_monitoring_receiver-*.log
 
 # Angie/nginx error log lines ("2026/10/01 12:00:00 [error] 1#1: ..."): the
 # level is extracted into the "level" field.

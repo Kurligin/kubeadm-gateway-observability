@@ -8,6 +8,10 @@ peers:
     namespace: {{ .Values.monitoring.namespace | quote }}
     labels:
       app.kubernetes.io/name: grafana
+  alertmanager:
+    namespace: {{ .Values.monitoring.namespace | quote }}
+    labels:
+      app.kubernetes.io/name: alertmanager
   # Envoy proxies of the Gateway (UI routes).
   envoy:
     namespace: envoy-gateway-system
@@ -86,6 +90,12 @@ namespaces:
           app.kubernetes.io/name: grafana
         from: [envoy]
         ports: [3000]
+      # Alert notifications (webhook) from Alertmanager only.
+      - name: alert-receiver
+        pods:
+          app.kubernetes.io/name: alert-receiver
+        from: [alertmanager]
+        ports: [8080]
 
   # Host-network agents only (node-exporter, etcd metrics proxy): network
   # policies do not apply to them; the policy covers any pod added later.

@@ -1,11 +1,12 @@
 image:
   repository: docker.io/rancher/local-path-provisioner
-  tag: v{{ .Values.versions.LOCAL_PATH_PROVISIONER_VERSION }}
+  # The chart has no digest field; tag@digest pins the image.
+  tag: {{ printf "v%s@%s" .Values.versions.LOCAL_PATH_PROVISIONER_VERSION .Values.versions.LOCAL_PATH_PROVISIONER_DIGEST | quote }}
 
 # Upstream default is busybox:latest; pinned for reproducibility.
 helperImage:
   repository: docker.io/library/busybox
-  tag: {{ .Values.versions.BUSYBOX_IMAGE_TAG | quote }}
+  tag: {{ printf "%s@%s" .Values.versions.BUSYBOX_IMAGE_TAG .Values.versions.BUSYBOX_DIGEST | quote }}
 
 storageClass:
   create: true

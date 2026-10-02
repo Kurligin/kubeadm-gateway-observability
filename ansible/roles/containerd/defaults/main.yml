@@ -16,3 +16,4 @@ containerd_binaries:
 containerd_runc_binary_path: /usr/local/sbin/runc
 
 containerd_socket: /run/containerd/containerd.sock
+containerd_dropin_dir: /etc/systemd/system/containerd.service.d

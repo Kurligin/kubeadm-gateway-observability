@@ -20,6 +20,11 @@
 #   DOMAIN       demo domain (default: demo.local)
 #   WAIT         seconds to wait for things that settle after a fresh
 #                deploy: pods, Prometheus targets (default: 300)
+#   ENVOY_REPLICAS  Envoy replicas of the Gateway (default: from the
+#                cluster, else 2), for the rate limit check
+#
+# Every request goes straight to the Gateway, never through an HTTP proxy
+# that may be set in the environment.
 #
 # Requires curl and jq. Safe to run repeatedly, also within the same minute
 # (see the rate limit check).
@@ -37,17 +42,30 @@ readonly BASIC_AUTH_SECRET=ui-basic-auth
 readonly CANARY_REQUESTS=200
 readonly CANARY_MIN_PCT=5
 readonly CANARY_MAX_PCT=20
-# Rate limit of /limited (charts/gateway values: 10 per minute).
+# Rate limit of /limited (charts/gateway values: 10 per minute). The token
+# bucket is local to each Envoy replica, so the Gateway as a whole lets
+# through up to 10 x <replicas> per minute.
 readonly LIMIT_PER_MINUTE=10
-readonly LIMIT_BURST=15
+# Envoy replicas of the Gateway (default: from the cluster, else 2).
+ENVOY_REPLICAS=${ENVOY_REPLICAS:-}
+# Response header set by every application route rule (its value is the
+# rule name) and a backend header the gateway removes from responses.
+readonly ROUTE_HEADER=x-gateway-route
+readonly HIDDEN_HEADER=x-backend-pod
 # Log search: how long a request may take to appear in VictoriaLogs.
 readonly LOG_TIMEOUT=45
+# Alert delivery: Alertmanager re-sends the always-firing Watchdog alert to
+# the webhook receiver every ~5 min (4 min repeat interval + 1 min group
+# interval), so the last ALERT_WINDOW minutes always hold a record. On a
+# fresh cluster the first one takes a minute or two after Prometheus starts.
+readonly ALERT_WINDOW=10m
+readonly ALERT_TIMEOUT=240
 # Prometheus jobs that must be up (every target of each).
 readonly KEY_JOBS=(apiserver kubelet kube-controller-manager kube-scheduler etcd-metrics
   coredns node-exporter kube-state-metrics cilium-agent envoy envoy-gateway
   web-v1 web-v2 fluentd victoria-logs)
 # Envoy clusters of the application route (not app-limited).
-readonly APP_CLUSTERS="httproute/${GATEWAY_NAMESPACE}/app/.*"
+readonly APP_CLUSTERS="httproute/${GATEWAY_NAMESPACE}/app/rule/[0-9]+"
 
 passed=0
 failed=0
@@ -136,7 +154,7 @@ have_kubectl() {
 https() {
   local host=$1
   shift
-  curl -sS --max-time 15 --cacert "${CA_FILE}" \
+  curl -sS --noproxy '*' --max-time 15 --cacert "${CA_FILE}" \
     --resolve "${host}.${DOMAIN}:443:${GATEWAY_IP}" "$@"
 }
 
@@ -255,11 +273,38 @@ check_gateway() {
   reason="Programmed=True, address ${address} = node IP"
 }
 
+# Every HTTPRoute of the Gateway is Accepted with all references resolved
+# (filters such as RequestMirror and the timeouts included).
+check_routes() {
+  have_kubectl || {
+    reason="no kubectl access to this cluster"
+    return 2
+  }
+  local routes total bad
+  routes="$(kubectl -n "${GATEWAY_NAMESPACE}" get httproutes -o json 2>/dev/null)" || {
+    reason="kubectl get httproutes failed"
+    return 1
+  }
+  total="$(jq '.items | length' <<<"${routes}")"
+  bad="$(jq -r '.items[] | .metadata.name as $n
+    | ([.status.parents[]?.conditions[]? | select(.type == "Accepted" or .type == "ResolvedRefs") | select(.status == "True")] | length) as $ok
+    | select($ok < 2) | $n' <<<"${routes}" | xargs)"
+  if [[ ${total} -eq 0 ]]; then
+    reason="no HTTPRoutes in ${GATEWAY_NAMESPACE}"
+    return 1
+  fi
+  if [[ -n ${bad} ]]; then
+    reason="not Accepted/ResolvedRefs: ${bad}"
+    return 1
+  fi
+  reason="${total}/${total} HTTPRoutes Accepted, ResolvedRefs=True"
+}
+
 # --- 3. HTTP and HTTPS --------------------------------------------------------
 
 check_http_redirect() {
   local out code location
-  out="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code} %{redirect_url}' \
+  out="$(curl -sS --noproxy '*' --max-time 15 -o /dev/null -w '%{http_code} %{redirect_url}' \
     -H "Host: app.${DOMAIN}" "http://${GATEWAY_IP}/" 2>&1)" || {
     reason="request failed: ${out}"
     return 1
@@ -333,31 +378,70 @@ check_canary_header() {
   [[ ${body} == *"version=v2"* ]]
 }
 
+# response_header <headers file> <name>: value of a response header, or "".
+response_header() {
+  awk -v name="$2" 'BEGIN { name = tolower(name) }
+    { line = $0; sub(/\r$/, "", line); split(line, kv, ":") }
+    tolower(kv[1]) == name { sub(/^[^:]*:[ \t]*/, "", line); print line; exit }' "$1"
+}
+
+# ResponseHeaderModifier of the route rules: every answer names the rule
+# that matched, and the backend's internal header is removed.
+check_response_headers() {
+  local path rule want headers got hidden
+  reason=""
+  for path in /:weighted /v2:path-v2; do
+    rule=${path#*:}
+    path=${path%%:*}
+    headers="${tmp_dir}/headers"
+    https app -o /dev/null -D "${headers}" "https://app.${DOMAIN}${path}" 2>/dev/null || true
+    got="$(response_header "${headers}" "${ROUTE_HEADER}")"
+    hidden="$(response_header "${headers}" "${HIDDEN_HEADER}")"
+    want=${rule}
+    reason+="${reason:+, }${path} -> ${ROUTE_HEADER}: ${got:-none}"
+    if [[ ${got} != "${want}" ]]; then
+      reason+=" (want ${want})"
+      return 1
+    fi
+    if [[ -n ${hidden} ]]; then
+      reason+=", ${HIDDEN_HEADER} not removed (${hidden})"
+      return 1
+    fi
+  done
+  reason+=", ${HIDDEN_HEADER} removed"
+}
+
 # --- 5. Rate limit ------------------------------------------------------------
 
-# /limited allows 10 requests per minute (token bucket of each Envoy
-# replica, refilled every minute). A burst of 15 must contain at most 10
-# successes and at least one 429 issued by the rate limiter itself (header
-# x-ratelimit-limit), not by anything else. Run again within the same
-# minute, the bucket may still be empty: then all 15 are 429, which is the
-# limit working as well. The main route must not be affected.
+# /limited allows 10 requests per minute in each Envoy replica (local token
+# bucket, refilled every minute). A burst of 10 x <replicas> + 5 requests
+# is more than all replicas together can let through, so it must contain
+# at least one 429 issued by the rate limiter itself (header
+# x-ratelimit-limit), and at most 10 x <replicas> successes, however the
+# requests are spread over the replicas. (The burst runs over one
+# connection, so in practice one replica answers: 10 x 200, the rest 429.)
+# Run again within the same minute, the buckets may still be empty: then
+# all are 429, which is the limit working as well. The main route must not
+# be affected.
 check_rate_limit() {
-  local config codes ok limited other main
+  local config codes ok limited other main burst allowed
+  allowed=$((LIMIT_PER_MINUTE * ENVOY_REPLICAS))
+  burst=$((allowed + 5))
   config="${tmp_dir}/limited.curl"
-  for _ in $(seq "${LIMIT_BURST}"); do
+  for _ in $(seq "${burst}"); do
     printf 'url = "https://app.%s/limited"\noutput = "/dev/null"\n' "${DOMAIN}"
   done >"${config}"
   codes="$(https app --config "${config}" -w '%{http_code} %header{x-ratelimit-limit}\n' 2>&1)" || true
   ok="$(grep -c '^200 ' <<<"${codes}" || true)"
   limited="$(grep -c "^429 ${LIMIT_PER_MINUTE}\$" <<<"${codes}" || true)"
-  other=$((LIMIT_BURST - ok - limited))
+  other=$((burst - ok - limited))
   main="$(https app -o /dev/null -w '%{http_code}' "https://app.${DOMAIN}/" 2>/dev/null || true)"
-  reason="${LIMIT_BURST} requests: ${ok} x 200, ${limited} x 429 (limit ${LIMIT_PER_MINUTE}/min)"
+  reason="${burst} requests: ${ok} x 200, ${limited} x 429 (limit ${LIMIT_PER_MINUTE}/min per replica, ${ENVOY_REPLICAS} replicas)"
   if [[ ${other} -ne 0 ]]; then
     reason+=", ${other} other: $(grep -v -e '^200 ' -e "^429 ${LIMIT_PER_MINUTE}\$" <<<"${codes}" | sort | uniq -c | xargs)"
     return 1
   fi
-  if [[ ${limited} -lt 1 || ${ok} -gt ${LIMIT_PER_MINUTE} ]]; then
+  if [[ ${limited} -lt 1 || ${ok} -gt ${allowed} ]]; then
     return 1
   fi
   if [[ ${main} != "200" ]]; then
@@ -371,9 +455,18 @@ check_rate_limit() {
 
 request_id=""
 
+# The traced request also carries a forged X-Gateway-Route header: the
+# route's RequestHeaderModifier must overwrite it before it reaches Angie.
 send_traced_request() {
   request_id="verify-$(date +%s)-${RANDOM}${RANDOM}"
-  https app -o /dev/null -H "X-Request-ID: ${request_id}" "https://app.${DOMAIN}/" 2>/dev/null || true
+  https app -o /dev/null -H "X-Request-ID: ${request_id}" -H "X-Gateway-Route: forged-by-client" \
+    "https://app.${DOMAIN}/" 2>/dev/null || true
+}
+
+# logs_for_request: every log record with the traced request ID, one JSON
+# object per line.
+logs_for_request() {
+  ui_get logs /select/logsql/query --data-urlencode "query=x_request_id:\"${request_id}\"" 2>/dev/null || true
 }
 
 # Both access logs (Angie and the Envoy proxy) must contain the request ID.
@@ -386,9 +479,7 @@ check_logs() {
   start=${SECONDS}
   send_traced_request
   while true; do
-    containers="$(ui_get logs /select/logsql/query \
-      --data-urlencode "query=x_request_id:\"${request_id}\"" 2>/dev/null |
-      jq -r '."kubernetes.container_name" // empty' 2>/dev/null | sort -u | xargs || true)"
+    containers="$(logs_for_request | jq -r '."kubernetes.container_name" // empty' 2>/dev/null | sort -u | xargs || true)"
     if [[ " ${containers} " == *" angie "* && " ${containers} " == *" envoy "* ]]; then
       reason="X-Request-ID ${request_id} found in Angie and Envoy access logs after $((SECONDS - start)) s"
       return 0
@@ -399,6 +490,40 @@ check_logs() {
     fi
     sleep 3
   done
+}
+
+# angie_records <jq filter>: Angie access log records of the traced request
+# that match the filter, compact JSON, one per line.
+angie_records() {
+  logs_for_request | jq -c "select(.\"kubernetes.container_name\" == \"angie\") | select($1)" 2>/dev/null || true
+}
+
+# RequestHeaderModifier: the live request reached Angie with the rule name
+# in X-Gateway-Route, not the value the client sent.
+check_request_header() {
+  [[ -n ${UI_PASSWORD} && -n ${request_id} ]] || {
+    reason="no traced request (step 6 skipped)"
+    return 2
+  }
+  local record got
+  record="$(angie_records '.traffic != "shadow"' | head -n1)"
+  got="$(printf '%s' "${record}" | jq -r '.gateway_route // empty' 2>/dev/null || true)"
+  reason="client sent X-Gateway-Route: forged-by-client, Angie got: ${got:-no record}"
+  [[ ${got} == "weighted" ]]
+}
+
+# RequestMirror: besides the live answer (v1 or v2), a copy of the same
+# request (same X-Request-ID) reached web-v2 on its shadow port.
+check_mirror() {
+  [[ -n ${UI_PASSWORD} && -n ${request_id} ]] || {
+    reason="no traced request (step 6 skipped)"
+    return 2
+  }
+  local live shadow
+  live="$(angie_records '.traffic != "shadow"' | jq -r '.version' | sort | xargs)"
+  shadow="$(angie_records '.traffic == "shadow"' | jq -r '.version' | sort | xargs)"
+  reason="X-Request-ID ${request_id}: live answer from [${live:-none}], shadow copy at [${shadow:-none}]"
+  [[ ${shadow} == "v2" && -n ${live} && ${live} != *" "* ]]
 }
 
 # --- 7. Prometheus ------------------------------------------------------------
@@ -422,7 +547,7 @@ check_targets() {
   }
   local targets missing=() down others job total
   targets="$(ui_get prometheus /api/v1/targets --data-urlencode 'state=active' 2>/dev/null |
-    jq -ce '[.data.activeTargets[] | {job: .labels.job, instance: .labels.instance, health}]')" || {
+    jq -ce '[.data.activeTargets[] | {job: .labels.job, instance: .labels.instance, health}]' 2>/dev/null)" || {
     reason="Prometheus API not reachable"
     return 1
   }
@@ -443,7 +568,15 @@ check_targets() {
     return 1
   fi
   reason="${#KEY_JOBS[@]} key jobs, ${total} targets, all up"
-  [[ -z ${others} ]] || reason+=" (other jobs not up: ${others})"
+  if [[ -n ${others} ]]; then
+    # Right after a deploy, a target of a pod that has just been replaced
+    # can still be reported down until its next scrape: look once more.
+    sleep 35
+    others="$(ui_get prometheus /api/v1/targets --data-urlencode 'state=active' 2>/dev/null |
+      jq -r --arg jobs " ${KEY_JOBS[*]} " "[.data.activeTargets[] | {job: .labels.job, health}
+        | select(.health != \"up\" and ((${key_filter}) | not)) | .job] | unique | join(\", \")" 2>/dev/null || true)"
+    [[ -z ${others} ]] || reason+="; not critical, still down after a re-check: ${others}"
+  fi
 }
 
 # Steps 3-6 sent more than ${CANARY_REQUESTS} requests to the app route.
@@ -478,6 +611,46 @@ check_envoy_counter() {
   }
 }
 
+# Resource metrics API (metrics-server): `kubectl top` works for nodes and
+# pods.
+check_kubectl_top() {
+  have_kubectl || {
+    reason="no kubectl access to this cluster"
+    return 2
+  }
+  local nodes pods
+  nodes="$(kubectl top nodes --no-headers 2>/dev/null)" || {
+    reason="kubectl top nodes failed (metrics-server not ready?)"
+    return 1
+  }
+  pods="$(kubectl top pods --all-namespaces --no-headers 2>/dev/null | wc -l | tr -d ' ')" || pods=0
+  if [[ -z ${nodes} || ${pods} -eq 0 ]]; then
+    reason="kubectl top: ${pods} pods"
+    return 1
+  fi
+  reason="kubectl top nodes: $(awk '{printf "%s%s CPU %s, memory %s", (NR > 1 ? "; " : ""), $1, $2, $4}' <<<"${nodes}"); top pods: ${pods} pods"
+}
+
+# Alert delivery end to end: the Watchdog alert (always firing) went
+# Prometheus -> Alertmanager -> webhook receiver -> Fluentd -> VictoriaLogs.
+check_alert_delivery() {
+  [[ -n ${UI_PASSWORD} ]] || {
+    reason="UI_PASSWORD not set (no kubectl access to read it)"
+    return 2
+  }
+  local records count last
+  records="$(ui_get logs /select/logsql/query \
+    --data-urlencode "query=_time:${ALERT_WINDOW} kubernetes.container_name:receiver alertname:Watchdog | sort by (_time desc)" \
+    --data-urlencode 'limit=20' 2>/dev/null || true)"
+  count="$(jq -s 'length' <<<"${records}" 2>/dev/null || echo 0)"
+  last="$(jq -rs 'first | ._time // empty' <<<"${records}" 2>/dev/null || true)"
+  if [[ ${count} -eq 0 ]]; then
+    reason="no Watchdog record from the alert receiver in VictoriaLogs within the last ${ALERT_WINDOW}"
+    return 1
+  fi
+  reason="${count} Watchdog notification(s) in the receiver log within the last ${ALERT_WINDOW}, latest ${last}"
+}
+
 check_angie_metrics() {
   [[ -n ${UI_PASSWORD} ]] || {
     reason="UI_PASSWORD not set (no kubectl access to read it)"
@@ -498,7 +671,7 @@ check_angie_metrics() {
 expect_code() {
   local want=$1 what=$2 code
   shift 2
-  code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+  code="$(curl -sS --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
   reason="${what}: ${code}"
   [[ ${code} == "${want}" ]]
 }
@@ -532,7 +705,7 @@ check_closed_endpoints() {
 # mean nothing answered.
 expect_unreachable() {
   local url=$1 what=$2 rc=0 code
-  code="$(curl -sS --max-time 5 -k -o /dev/null -w '%{http_code}' "${url}" 2>/dev/null)" || rc=$?
+  code="$(curl -sS --noproxy '*' --max-time 5 -k -o /dev/null -w '%{http_code}' "${url}" 2>/dev/null)" || rc=$?
   if [[ ${rc} -eq 7 || ${rc} -eq 28 || ${rc} -eq 56 || ${rc} -eq 35 ]]; then
     reason="${what}: connection refused/reset (curl exit ${rc})"
     return 0
@@ -554,7 +727,7 @@ check_etcd_proxy_auth() {
 # firewall resets the connection before it gets there.
 check_node_exporter() {
   local rc=0 code
-  code="$(curl -sS --max-time 5 -k -o /dev/null -w '%{http_code}' "https://${GATEWAY_IP}:9100/metrics" 2>/dev/null)" || rc=$?
+  code="$(curl -sS --noproxy '*' --max-time 5 -k -o /dev/null -w '%{http_code}' "https://${GATEWAY_IP}:9100/metrics" 2>/dev/null)" || rc=$?
   if [[ ${code} == "401" ]]; then
     reason="node-exporter :9100 without token: 401"
     return 0
@@ -616,7 +789,13 @@ setup() {
       -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
   fi
   UI_PASSWORD=${UI_PASSWORD:-}
-  readonly GATEWAY_IP CA_FILE UI_PASSWORD
+  if [[ -z ${ENVOY_REPLICAS} && ${kube} == true ]]; then
+    ENVOY_REPLICAS="$(kubectl -n envoy-gateway-system get deployments \
+      -l "gateway.envoyproxy.io/owning-gateway-name=${GATEWAY_NAME},gateway.envoyproxy.io/owning-gateway-namespace=${GATEWAY_NAMESPACE}" \
+      -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null || true)"
+  fi
+  ENVOY_REPLICAS=${ENVOY_REPLICAS:-2}
+  readonly GATEWAY_IP CA_FILE UI_PASSWORD ENVOY_REPLICAS
 }
 
 main() {
@@ -627,6 +806,7 @@ main() {
   check 1 "All pods Running and Ready" check_pods "${WAIT}"
   check 1 "All Helm releases deployed" check_releases
   check 2 "Gateway Programmed, address = node IP" check_gateway 120
+  check 2 "HTTPRoutes Accepted, references resolved" check_routes 60
 
   # Baseline of the Envoy request counter, before the traffic below.
   [[ -z ${UI_PASSWORD} ]] || envoy_requests_before="$(envoy_requests)"
@@ -637,11 +817,16 @@ main() {
   check 4 "Canary split (weights 90/10)" check_canary
   check 4 "Path /v2 -> v2" check_canary_path
   check 4 "Header X-Canary: true -> v2" check_canary_header
+  check 4 "Response headers set/removed by the route" check_response_headers
   check 5 "Rate limit /limited -> 429" check_rate_limit
   check 6 "Request ID in VictoriaLogs (<= ${LOG_TIMEOUT} s)" check_logs
+  check 6 "Request header overwritten by the route" check_request_header 30
+  check 6 "Mirror: shadow copy of the request at v2" check_mirror 30
   check 7 "Prometheus: key targets up" check_targets "${WAIT}"
   check 7 "Prometheus: Envoy request counter grew" check_envoy_counter 120
   check 7 "Prometheus: Angie requests by version" check_angie_metrics 120
+  check 7 "kubectl top nodes / pods (metrics-server)" check_kubectl_top 120
+  check 7 "Alerts delivered: Watchdog in receiver log" check_alert_delivery "${ALERT_TIMEOUT}"
   check 8 "Prometheus UI requires password" check_prometheus_auth
   check 8 "Logs UI requires password" check_logs_auth
   check 8 "Lifecycle/insert endpoints not routed" check_closed_endpoints

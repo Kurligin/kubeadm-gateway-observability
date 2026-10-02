@@ -5,6 +5,8 @@
 #   ./deploy.sh --bootstrap-only   only prepare .venv with Ansible
 #
 # Extra environment variables (NODE_IP, INVENTORY, ...) are passed to make.
+# Behind an HTTP(S) proxy, set HTTP_PROXY / HTTPS_PROXY (and NO_PROXY if
+# needed) for every run; without them nothing proxy-related is configured.
 # Safe to run repeatedly: every step checks the current state first.
 # Works both as a regular user with sudo and as root (`sudo ./deploy.sh`);
 # the Python environment in .venv always belongs to the owner of the
@@ -19,6 +21,8 @@ readonly COLLECTIONS_FILE="${REPO_DIR}/ansible/requirements.yml"
 readonly COLLECTIONS_DIR="${REPO_DIR}/ansible/collections"
 readonly SYSTEM_PACKAGES=(python3 python3-venv make)
 readonly CLOUD_INIT_TIMEOUT=900
+# Kept by sudo (it resets the environment otherwise).
+readonly PROXY_VARS=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -31,8 +35,19 @@ as_root() {
   if [[ ${EUID} -eq 0 ]]; then
     "$@"
   else
-    sudo "$@"
+    sudo --preserve-env="${PROXY_VARS}" "$@"
   fi
+}
+
+# apt and curl read only the lower-case proxy variables, Go programs both:
+# whichever spelling is set, export both.
+normalize_proxy_env() {
+  local http=${HTTP_PROXY:-${http_proxy:-}} https=${HTTPS_PROXY:-${https_proxy:-}}
+  local no=${NO_PROXY:-${no_proxy:-}}
+  [[ -n ${http}${https} ]] || return 0
+  export HTTP_PROXY=${http} http_proxy=${http} HTTPS_PROXY=${https} https_proxy=${https}
+  export NO_PROXY=${no} no_proxy=${no}
+  log "Using the HTTP(S) proxy ${https:-${http}}"
 }
 
 check_os() {
@@ -52,7 +67,7 @@ as_repo_owner() {
   local owner
   owner="$(stat -c %U "${REPO_DIR}")"
   if [[ ${EUID} -eq 0 && ${owner} != "root" ]]; then
-    sudo -H -u "${owner}" -- "$@"
+    sudo -H --preserve-env="${PROXY_VARS}" -u "${owner}" -- "$@"
   else
     "$@"
   fi
@@ -124,7 +139,7 @@ main() {
     --bootstrap-only) bootstrap_only=true ;;
     "") ;;
     -h | --help)
-      sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       return
       ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -132,6 +147,7 @@ main() {
 
   cd "${REPO_DIR}"
   check_os
+  normalize_proxy_env
   wait_for_cloud_init
   install_system_packages
   prepare_venv

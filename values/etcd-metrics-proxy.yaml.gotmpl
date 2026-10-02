@@ -1,5 +1,6 @@
 image:
   tag: {{ .Values.versions.KUBE_RBAC_PROXY_VERSION | quote }}
+  digest: {{ .Values.versions.KUBE_RBAC_PROXY_DIGEST | quote }}
 
 nodeIP: {{ .Values.nodeIP | quote }}
 

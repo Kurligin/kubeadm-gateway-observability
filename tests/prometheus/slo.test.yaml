@@ -1,0 +1,125 @@
+---
+# Unit tests of the SLO recording rules and burn rate alerts
+# (charts/observability-extras/templates/prometheusrule-slo.yaml).
+# Run by `make lint` (scripts/check-rules.sh), which renders the chart into
+# rules.yaml next to this file. Firing alerts are checked through the ALERTS
+# series, so the tests do not depend on the annotation texts.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 10 requests/s, 5 % of them 5xx: 50x the allowed 0.1 %. Both the fast
+  # (14.4x over 1 h and 5 min) and the slow burn alerts fire.
+  - name: availability, 5 % errors -> fast and slow burn
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="5"}'
+        values: '0+30x120'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="2"}'
+        values: '0+570x120'
+    promql_expr_test:
+      # Rounded: the ratio of two rates is not exact in floating point.
+      - expr: round(slo:sli_error:ratio_rate5m{slo="app-availability"}, 0.0001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{slo="app-availability"}'
+            value: 0.05
+      - expr: ALERTS{alertstate="firing", slo="app-availability"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AppAvailabilityBudgetBurnFast", alertstate="firing", severity="critical", slo="app-availability"}'
+            value: 1
+          - labels: 'ALERTS{alertname="AppAvailabilityBudgetBurnSlow", alertstate="firing", severity="warning", slo="app-availability"}'
+            value: 1
+
+  # 0.5 % errors: 5x the allowed rate. Below both fast thresholds (14.4x
+  # and 6x), above the slow ones (3x over 1 day and 2 h).
+  - name: availability, 0.5 % errors -> slow burn only
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+1000x240'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2", envoy_response_code_class="5"}'
+        values: '0+5x240'
+    promql_expr_test:
+      - expr: ALERTS{alertstate="firing", slo="app-availability"}
+        eval_time: 3h
+        exp_samples:
+          - labels: 'ALERTS{alertname="AppAvailabilityBudgetBurnSlow", alertstate="firing", severity="warning", slo="app-availability"}'
+            value: 1
+
+  # No 5xx on the application route: the ratio is recorded as 0 and no
+  # alert fires, even though the mirror cluster (shadow copies, answers
+  # discarded) and another route fail all the time.
+  - name: availability, healthy route -> no alert, mirror and other routes ignored
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2-mirror-2"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/app/rule/2-mirror-2", envoy_response_code_class="5"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_xx{envoy_cluster_name="httproute/gateway/ui-grafana/rule/0", envoy_response_code_class="5"}'
+        values: '0+600x120'
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate1h{slo="app-availability"}
+        eval_time: 90m
+        exp_samples:
+          - labels: 'slo:sli_error:ratio_rate1h{slo="app-availability"}'
+            value: 0
+      - expr: ALERTS{slo="app-availability"}
+        eval_time: 90m
+        exp_samples: []
+
+  # No traffic at all: nothing to measure, no ratio, no alert.
+  - name: availability, no traffic -> no ratio, no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_total{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0x60'
+    promql_expr_test:
+      - expr: ALERTS{slo="app-availability"}
+        eval_time: 60m
+        exp_samples: []
+
+  # 20 % of the requests slower than 250 ms: 20x the allowed 1 %, above the
+  # fast threshold (14.4x).
+  - name: latency, 20 % slow requests -> fast burn
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="httproute/gateway/app/rule/2", le="250.0"}'
+        values: '0+480x120'
+      - series: 'envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="httproute/gateway/app/rule/2", le="+Inf"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_time_count{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x120'
+    promql_expr_test:
+      # Rounded: the ratio of two rates is not exact in floating point.
+      - expr: round(slo:sli_error:ratio_rate5m{slo="app-latency"}, 0.0001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{slo="app-latency"}'
+            value: 0.2
+      - expr: ALERTS{alertstate="firing", alertname="AppLatencyBudgetBurnFast"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AppLatencyBudgetBurnFast", alertstate="firing", severity="critical", slo="app-latency"}'
+            value: 1
+
+  # All requests fast: no latency alert.
+  - name: latency, all requests fast -> no alert
+    interval: 1m
+    input_series:
+      - series: 'envoy_cluster_upstream_rq_time_bucket{envoy_cluster_name="httproute/gateway/app/rule/2", le="250.0"}'
+        values: '0+600x120'
+      - series: 'envoy_cluster_upstream_rq_time_count{envoy_cluster_name="httproute/gateway/app/rule/2"}'
+        values: '0+600x120'
+    promql_expr_test:
+      - expr: ALERTS{slo="app-latency"}
+        eval_time: 90m
+        exp_samples: []

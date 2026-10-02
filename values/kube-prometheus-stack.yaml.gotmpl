@@ -1,5 +1,19 @@
 # Prometheus, Alertmanager, Grafana, node-exporter and kube-state-metrics,
 # sized for a single node with 4-8 GB of RAM.
+#
+# Images: tag and digest from versions.env (<NAME>_IMAGE = <tag>@sha256:<hex>).
+# Most templates of this chart want the bare hex ("sha"), kube-state-metrics
+# and node-exporter the "sha256:<hex>" form.
+{{- $v := .Values.versions }}
+{{- $tag := dict }}
+{{- $sha := dict }}
+{{- $digest := dict }}
+{{- range $key := list "PROMETHEUS_OPERATOR_IMAGE" "PROMETHEUS_CONFIG_RELOADER_IMAGE" "PROMETHEUS_IMAGE" "ALERTMANAGER_IMAGE" "THANOS_IMAGE" "GRAFANA_IMAGE" "GRAFANA_SIDECAR_IMAGE" "KUBE_STATE_METRICS_IMAGE" "NODE_EXPORTER_IMAGE" }}
+{{-   $parts := splitList "@" (index $v $key) }}
+{{-   $_ := set $tag $key (first $parts) }}
+{{-   $_ := set $digest $key (last $parts) }}
+{{-   $_ := set $sha $key (last $parts | trimPrefix "sha256:") }}
+{{- end }}
 
 # The Prometheus Operator CRDs are a separate release
 # (prometheus-operator-crds), installed before everything else.
@@ -14,6 +28,14 @@ defaultRules:
 
 # --- Prometheus Operator ---
 prometheusOperator:
+  image:
+    tag: {{ $tag.PROMETHEUS_OPERATOR_IMAGE | quote }}
+    sha: {{ $sha.PROMETHEUS_OPERATOR_IMAGE | quote }}
+  # Passed to the operator as the default image of Thanos sidecars; no
+  # Thanos runs here.
+  thanosImage:
+    tag: {{ $tag.THANOS_IMAGE | quote }}
+    sha: {{ $sha.THANOS_IMAGE | quote }}
   # No validating/mutating webhooks: they need an extra certificate job on
   # every upgrade and can race with the first install. PrometheusRules are
   # checked by `promtool check rules` in `make lint` instead.
@@ -29,6 +51,9 @@ prometheusOperator:
     limits:
       memory: 192Mi
   prometheusConfigReloader:
+    image:
+      tag: {{ $tag.PROMETHEUS_CONFIG_RELOADER_IMAGE | quote }}
+      sha: {{ $sha.PROMETHEUS_CONFIG_RELOADER_IMAGE | quote }}
     resources:
       requests:
         cpu: 10m
@@ -39,6 +64,9 @@ prometheusOperator:
 # --- Prometheus ---
 prometheus:
   prometheusSpec:
+    image:
+      tag: {{ $tag.PROMETHEUS_IMAGE | quote }}
+      sha: {{ $sha.PROMETHEUS_IMAGE | quote }}
     scrapeInterval: 30s
     evaluationInterval: 30s
     # Three days of metrics, capped in size so the node disk never fills up
@@ -71,10 +99,38 @@ prometheus:
               storage: 4Gi
 
 # --- Alertmanager ---
-# One replica, no external receivers: alerts are visible in the
-# Alertmanager and Prometheus APIs and in Grafana.
+# One replica. Every alert (except the technical InfoInhibitor) goes to the
+# in-cluster webhook receiver of observability-extras, which writes it as a
+# JSON line to its log: alerts end up in VictoriaLogs next to the logs
+# (`alertname:Watchdog`), besides the Alertmanager, Prometheus and Grafana
+# UIs. Watchdog (always firing) is sent every few minutes: its records in
+# VictoriaLogs prove that the whole chain Prometheus -> Alertmanager ->
+# receiver -> Fluentd -> VictoriaLogs works (checked by `make verify`).
+# The inhibition rules stay the chart defaults.
 alertmanager:
+  config:
+    route:
+      receiver: alert-log
+      routes:
+        - receiver: "null"
+          matchers:
+            - alertname = "InfoInhibitor"
+        - receiver: alert-log
+          matchers:
+            - alertname = "Watchdog"
+          group_wait: 10s
+          group_interval: 1m
+          repeat_interval: 4m
+    receivers:
+      - name: "null"
+      - name: alert-log
+        webhook_configs:
+          - url: {{ printf "http://alert-receiver.%s.svc:8080/alerts" .Values.monitoring.namespace | quote }}
+            send_resolved: true
   alertmanagerSpec:
+    image:
+      tag: {{ $tag.ALERTMANAGER_IMAGE | quote }}
+      sha: {{ $sha.ALERTMANAGER_IMAGE | quote }}
     replicas: 1
     # UI is published through the Gateway (basic auth).
     externalUrl: {{ printf "https://alertmanager.%s" .Values.domain | quote }}
@@ -88,6 +144,23 @@ alertmanager:
 
 # --- Grafana ---
 grafana:
+  image:
+    tag: {{ $tag.GRAFANA_IMAGE | quote }}
+    sha: {{ $sha.GRAFANA_IMAGE | quote }}
+  # No Helm test pod (it would need one more image).
+  testFramework:
+    enabled: false
+  {{- $httpProxy := env "HTTP_PROXY" }}
+  {{- $httpsProxy := env "HTTPS_PROXY" }}
+  {{- if or $httpProxy $httpsProxy }}
+  # Deployed behind an HTTP(S) proxy (HTTP_PROXY / HTTPS_PROXY were set):
+  # the VictoriaLogs plugin is downloaded from grafana.com through it.
+  # In-cluster addresses (datasources use <service>.<namespace>) bypass it.
+  env:
+    HTTP_PROXY: {{ $httpProxy | quote }}
+    HTTPS_PROXY: {{ $httpsProxy | quote }}
+    NO_PROXY: {{ printf "%s,%s,%s" (env "NO_PROXY") .Values.monitoring.namespace .Values.logging.namespace | trimPrefix "," | quote }}
+  {{- end }}
   # Admin credentials come from a Secret created on the first deploy by
   # scripts/ensure-grafana-admin.sh (random password, never in git).
   admin:
@@ -122,6 +195,9 @@ grafana:
     limits:
       memory: 512Mi
   sidecar:
+    image:
+      tag: {{ $tag.GRAFANA_SIDECAR_IMAGE | quote }}
+      sha: {{ $sha.GRAFANA_SIDECAR_IMAGE | quote }}
     resources:
       requests:
         cpu: 10m
@@ -200,6 +276,9 @@ kubeProxy:
 
 # --- kube-state-metrics ---
 kube-state-metrics:
+  image:
+    tag: {{ $tag.KUBE_STATE_METRICS_IMAGE | quote }}
+    sha: {{ $digest.KUBE_STATE_METRICS_IMAGE | quote }}
   resources:
     requests:
       cpu: 10m
@@ -249,6 +328,11 @@ kube-state-metrics:
 # only Prometheus' ServiceAccount is allowed to. Without a token: 401.
 prometheus-node-exporter:
   namespaceOverride: {{ .Values.monitoring.nodeNamespace | quote }}
+  # The tag already names the distroless variant.
+  image:
+    tag: {{ $tag.NODE_EXPORTER_IMAGE | quote }}
+    distroless: false
+    digest: {{ $digest.NODE_EXPORTER_IMAGE | quote }}
   resources:
     requests:
       cpu: 10m
@@ -272,6 +356,7 @@ prometheus-node-exporter:
     enabled: true
     image:
       tag: {{ printf "v%s" .Values.versions.KUBE_RBAC_PROXY_VERSION | quote }}
+      sha: {{ .Values.versions.KUBE_RBAC_PROXY_DIGEST | trimPrefix "sha256:" | quote }}
     tls:
       enabled: true
     containerSecurityContext:

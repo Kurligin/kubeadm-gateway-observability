@@ -5,7 +5,8 @@ server:
   image:
     # quay.io: the same image without Docker Hub's anonymous pull limit.
     registry: quay.io
-    tag: {{ printf "v%s" .Values.versions.VICTORIA_LOGS_VERSION | quote }}
+    # tag@digest (the chart strips the digest for its version label).
+    tag: {{ printf "v%s@%s" .Values.versions.VICTORIA_LOGS_VERSION .Values.versions.VICTORIA_LOGS_DIGEST | quote }}
   # Seven days of logs, and never more than 2 GiB on disk (the oldest days
   # are dropped first), so the node disk never fills up.
   retentionPeriod: 7d

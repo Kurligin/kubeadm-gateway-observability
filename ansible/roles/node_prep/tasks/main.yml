@@ -14,6 +14,22 @@
     msg: "Tested on Ubuntu 24.04, this host runs {{ ansible_facts['distribution_version'] }}; continuing."
   when: ansible_facts['distribution_version'] != '24.04'
 
+# Own file, only while a proxy is configured; removed again without one.
+- name: Configure the apt proxy
+  ansible.builtin.template:
+    src: apt-proxy.conf.j2
+    dest: "{{ node_prep_apt_proxy_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: proxy_enabled | bool
+
+- name: Remove the apt proxy configuration when no proxy is set
+  ansible.builtin.file:
+    path: "{{ node_prep_apt_proxy_file }}"
+    state: absent
+  when: not proxy_enabled | bool
+
 - name: Install base packages
   ansible.builtin.apt:
     name: "{{ node_prep_packages }}"

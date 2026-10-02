@@ -1,6 +1,8 @@
 {{- $policy := .Values.app.trafficPolicy }}
 {{- range $route, $limit := dict "app" $policy.rateLimit "app-limited" .Values.app.limited.rateLimit }}
 ---
+# Settings the Gateway API standard channel has no field for. The request
+# timeout is set on the routes themselves (HTTPRoute timeouts).
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
@@ -16,8 +18,8 @@ spec:
   timeout:
     tcp:
       connectTimeout: {{ $policy.connectTimeout }}
-    http:
-      requestTimeout: {{ $policy.requestTimeout }}
+  # Each attempt is limited by perRetry.timeout, all of them together by
+  # the route's timeouts.request.
   retry:
     numRetries: {{ $policy.retry.numRetries }}
     perRetry:
@@ -25,7 +27,8 @@ spec:
     retryOn:
       triggers:
         {{- toYaml $policy.retry.triggers | nindent 8 }}
-  # Local token bucket in each Envoy replica; over the limit -> HTTP 429.
+  # Local token bucket in each Envoy replica (not shared between them);
+  # over the limit -> HTTP 429.
   rateLimit:
     local:
       rules:

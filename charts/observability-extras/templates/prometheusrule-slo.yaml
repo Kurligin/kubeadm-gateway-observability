@@ -1,0 +1,77 @@
+{{- $app := printf "envoy_cluster_name=~\"%s\"" .Values.envoyGateway.appClusterRegex }}
+{{- $slo := .Values.slo }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-slo" .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability-extras.labels" . | nindent 4 }}
+spec:
+  groups:
+    {{- range $o := $slo.objectives }}
+    # --- SLO {{ $o.name }}: {{ $o.description }} ---
+    - name: {{ printf "slo-%s-recordings" $o.name }}
+      rules:
+        # Allowed error ratio (1 - objective), for burn rate queries.
+        - record: slo:error_budget:ratio
+          expr: vector({{ include "observability-extras.sloBudget" $o }})
+          labels:
+            slo: {{ $o.name }}
+        - record: slo:objective:ratio
+          expr: vector({{ $o.objective }})
+          labels:
+            slo: {{ $o.name }}
+        {{- range $w := $slo.windows }}
+        {{- if eq $o.kind "availability" }}
+        # Share of 5xx answers (0 when there were requests, but no 5xx).
+        - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
+          expr: |
+            (sum(rate(envoy_cluster_upstream_rq_xx{ {{- $app }}, envoy_response_code_class="5"}[{{ $w }}])) or vector(0))
+            /
+            sum(rate(envoy_cluster_upstream_rq_total{ {{- $app }}}[{{ $w }}]))
+          labels:
+            slo: {{ $o.name }}
+        {{- else if eq $o.kind "latency" }}
+        # Share of requests slower than {{ $o.thresholdMs }} ms.
+        - record: {{ printf "slo:sli_error:ratio_rate%s" $w }}
+          expr: |
+            1 - (
+              sum(rate(envoy_cluster_upstream_rq_time_bucket{ {{- $app }}, le="{{ printf "%.1f" (float64 $o.thresholdMs) }}"}[{{ $w }}]))
+              /
+              sum(rate(envoy_cluster_upstream_rq_time_count{ {{- $app }}}[{{ $w }}]))
+            )
+          labels:
+            slo: {{ $o.name }}
+        {{- else }}
+        {{- fail (printf "slo %s: unknown kind %q" $o.name $o.kind) }}
+        {{- end }}
+        {{- end }}
+
+    - name: {{ printf "slo-%s-alerts" $o.name }}
+      rules:
+        {{- range $a := $slo.burnRateAlerts }}
+        - alert: {{ printf "%sBudgetBurn%s" $o.alertPrefix $a.speed }}
+          expr: |
+            {{- range $i, $w := $a.windows }}
+            {{- if $i }}
+            or
+            {{- end }}
+            (
+              slo:sli_error:ratio_rate{{ $w.long }}{slo="{{ $o.name }}"} > ({{ $w.factor }} * {{ include "observability-extras.sloBudget" $o }})
+              and
+              slo:sli_error:ratio_rate{{ $w.short }}{slo="{{ $o.name }}"} > ({{ $w.factor }} * {{ include "observability-extras.sloBudget" $o }})
+            )
+            {{- end }}
+          labels:
+            severity: {{ $a.severity }}
+            slo: {{ $o.name }}
+          annotations:
+            summary: {{ printf "%s: error budget burns %s" $o.name ($a.speed | lower) | quote }}
+            description: >-
+              SLO "{{ $o.description }}" ({{ $slo.period }}): the error budget is being spent
+              {{- range $i, $w := $a.windows }}{{ if $i }} or{{ end }} {{ $w.factor }}x faster than allowed over {{ $w.long }} (confirmed over {{ $w.short }}){{ end }}.
+              Error ratio over the long window: {{ "{{ $value | humanizePercentage }}" }}.
+              See the "Gateway / SLO" dashboard.
+        {{- end }}
+    {{- end }}

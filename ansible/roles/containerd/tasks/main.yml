@@ -101,6 +101,34 @@
     mode: "0644"
   notify: Restart containerd
 
+# Image pulls go through the proxy of the deployment, if there is one
+# (the drop-in exists only then; removing it restarts containerd too).
+- name: Create the containerd drop-in directory
+  ansible.builtin.file:
+    path: "{{ containerd_dropin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: proxy_enabled | bool
+
+- name: Configure the proxy for containerd
+  ansible.builtin.template:
+    src: http-proxy.conf.j2
+    dest: "{{ containerd_dropin_dir }}/http-proxy.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: proxy_enabled | bool
+  notify: Restart containerd
+
+- name: Remove the containerd proxy configuration when no proxy is set
+  ansible.builtin.file:
+    path: "{{ containerd_dropin_dir }}/http-proxy.conf"
+    state: absent
+  when: not proxy_enabled | bool
+  notify: Restart containerd
+
 - name: Enable and start containerd
   ansible.builtin.systemd_service:
     name: containerd

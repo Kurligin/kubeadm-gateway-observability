@@ -37,7 +37,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: kube-rbac-proxy
-          image: "{{ .Values.image.repository }}:v{{ $tag }}"
+          image: "{{ .Values.image.repository }}:v{{ $tag }}{{ with .Values.image.digest }}@{{ . }}{{ end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --secure-listen-address=$(NODE_IP):{{ .Values.listenPort }}

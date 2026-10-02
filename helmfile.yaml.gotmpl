@@ -89,6 +89,8 @@ repositories:
     url: https://prometheus-community.github.io/helm-charts
   - name: vm
     url: https://victoriametrics.github.io/helm-charts
+  - name: metrics-server
+    url: https://kubernetes-sigs.github.io/metrics-server/
 
 releases:
   # Prometheus Operator CRDs (ServiceMonitor, PodMonitor, PrometheusRule, ...)
@@ -180,7 +182,7 @@ releases:
     needs:
       - kube-system/namespaces
     values:
-      - values/envoy-gateway.yaml
+      - values/envoy-gateway.yaml.gotmpl
     hooks:
       - events: ["presync"]
         showlogs: true
@@ -355,3 +357,22 @@ releases:
           - {{ .Values.gateway.namespace | quote }}
           - {{ .Values.basicAuth.secretName | quote }}
           - {{ .Values.basicAuth.username | quote }}
+
+  # Resource metrics API (`kubectl top`). Installed last: while its
+  # APIService is registered but not yet served, API discovery reports
+  # metrics.k8s.io as unavailable, which must not disturb the other
+  # releases (they are all done by then). Serving certificate from the
+  # demo CA (pki).
+  - name: metrics-server
+    namespace: kube-system
+    chart: metrics-server/metrics-server
+    version: {{ .Values.versions.METRICS_SERVER_CHART_VERSION | quote }}
+    disableValidationOnInstall: true
+    needs:
+      - cert-manager/pki
+      - {{ printf "%s/ui-routes" .Values.gateway.namespace }}
+      - {{ printf "%s/logging" .Values.logging.nodeNamespace }}
+      - {{ printf "%s/etcd-metrics-proxy" .Values.monitoring.nodeNamespace }}
+      - kube-system/network-policies
+    values:
+      - values/metrics-server.yaml.gotmpl

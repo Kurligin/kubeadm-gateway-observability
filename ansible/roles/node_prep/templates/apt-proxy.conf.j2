@@ -1,0 +1,9 @@
+// {{ ansible_managed }}
+// Proxy of the deployment (HTTP_PROXY / HTTPS_PROXY); removed by the next
+// deployment that runs without one.
+{% if proxy_http %}
+Acquire::http::Proxy "{{ proxy_http }}";
+{% endif %}
+{% if proxy_https %}
+Acquire::https::Proxy "{{ proxy_https }}";
+{% endif %}

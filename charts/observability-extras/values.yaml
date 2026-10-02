@@ -2,9 +2,11 @@
 # Envoy Gateway controller and the Envoy proxies it deploys.
 envoyGateway:
   namespace: envoy-gateway-system
-  # Prefix of the Envoy cluster names of the application route
-  # (httproute/<gateway namespace>/<route name>/rule/<n>).
-  appClusterPrefix: httproute/gateway/app/
+  # Envoy clusters of the application route
+  # (httproute/<gateway namespace>/<route name>/rule/<n>), regular
+  # expression. Mirror clusters (".../rule/<n>-mirror-<m>", shadow copies
+  # whose answers nobody sees) do not match.
+  appClusterRegex: httproute/gateway/app/rule/[0-9]+
 
 # Demo application (Angie web-v1 / web-v2).
 app:
@@ -29,6 +31,23 @@ victoriaLogs:
   job: victoria-logs
   namespace: logging
 
+# Webhook receiver of Alertmanager (files/alert_receiver.py): writes every
+# alert it gets as one JSON line to stdout, so alerts end up in VictoriaLogs
+# like any other log. Alertmanager sends it every alert (Watchdog
+# included, which proves that alert delivery works end to end).
+alertReceiver:
+  name: alert-receiver
+  # Required: Python image, <repository>:<tag>@sha256:<digest>
+  # (versions.env ALERT_RECEIVER_IMAGE).
+  image: ""
+  port: 8080
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      memory: 64Mi
+
 # Alert thresholds.
 alerts:
   # Share of 5xx responses of the application route.
@@ -38,5 +57,45 @@ alerts:
   # Ignore error ratio and latency below this request rate (req/s), so a
   # couple of requests in an idle cluster do not page anyone.
   minRequestRate: 0.1
+
+# Service level objectives of the application route (Envoy metrics of the
+# app route, mirror clusters excluded), with multi-window, multi-burn-rate
+# alerts as in the Google SRE workbook ("Alerting on SLOs"). Error ratios
+# are recorded as slo:sli_error:ratio_rate<window>{slo="<name>"}.
+slo:
+  # Period the objectives are defined over. Prometheus keeps 3 days of
+  # metrics, so the longest window used here is 3 days (the slowest burn
+  # rate alert); a 30-day budget report needs a longer retention.
+  period: 30d
+  windows: [5m, 30m, 1h, 2h, 6h, 1d, 3d]
+  objectives:
+    # 99.9 % of requests answered without a 5xx.
+    - name: app-availability
+      alertPrefix: AppAvailability
+      kind: availability
+      objective: 0.999
+      description: 99.9 % of the requests to app.demo.local are answered without a 5xx
+    # 99 % of requests answered by the application within 250 ms (Envoy
+    # upstream time; must be a bucket boundary of envoy_cluster_upstream_rq_time).
+    - name: app-latency
+      alertPrefix: AppLatency
+      kind: latency
+      objective: 0.99
+      thresholdMs: 250
+      description: 99 % of the requests to app.demo.local are answered within 250 ms
+  # Burn rate alerts: an alert fires when both the long and the short window
+  # burn the error budget at least <factor> times faster than allowed.
+  # factor 14.4 over 1 h = 2 % of a 30-day budget in an hour, and so on.
+  burnRateAlerts:
+    - speed: Fast
+      severity: critical
+      windows:
+        - {long: 1h, short: 5m, factor: 14.4}
+        - {long: 6h, short: 30m, factor: 6}
+    - speed: Slow
+      severity: warning
+      windows:
+        - {long: 1d, short: 2h, factor: 3}
+        - {long: 3d, short: 6h, factor: 1}
 
 scrapeInterval: 30s

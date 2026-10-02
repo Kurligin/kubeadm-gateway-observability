@@ -6,6 +6,8 @@ ansible/collections/
 
 # Generated at runtime
 .cache/
+__pycache__/
+.ruff_cache/
 *.kubeconfig
 
 # CA certificate exported by `make ca`

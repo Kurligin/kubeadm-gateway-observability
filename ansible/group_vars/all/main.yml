@@ -23,3 +23,26 @@ kube_user: >-
 # Single-node cluster: allow workloads on the control plane and let Cilium
 # node IPAM use this node for LoadBalancer Services.
 k8s_single_node: true
+
+# HTTP(S) proxy, taken from the environment of the deployment (HTTP_PROXY,
+# HTTPS_PROXY, NO_PROXY or their lower-case forms). Unset: no proxy
+# anywhere, and proxy settings written by an earlier run are removed. Set:
+# Ansible downloads (play environment), apt (apt.conf.d) and containerd
+# image pulls (systemd drop-in) use it; NO_PROXY is completed with what must
+# never go through the proxy. The kubelet needs none: it pulls no images
+# itself and only talks to the API server on this node.
+proxy_http: "{{ lookup('ansible.builtin.env', 'HTTP_PROXY') | default(lookup('ansible.builtin.env', 'http_proxy'), true) }}"
+proxy_https: "{{ lookup('ansible.builtin.env', 'HTTPS_PROXY') | default(lookup('ansible.builtin.env', 'https_proxy'), true) }}"
+proxy_enabled: "{{ (proxy_http ~ proxy_https) | length > 0 }}"
+proxy_no_proxy: >-
+  {{ ((lookup('ansible.builtin.env', 'NO_PROXY') | default(lookup('ansible.builtin.env', 'no_proxy'), true)).split(',')
+      + ['localhost', '127.0.0.1', '::1']
+      + (ansible_facts['all_ipv4_addresses'] | default([]))
+      + [k8s_pod_subnet, k8s_service_subnet, '.svc', '.cluster.local', proxy_demo_domain, '.' ~ proxy_demo_domain])
+     | map('trim') | reject('equalto', '') | unique | join(',') }}
+proxy_demo_domain: demo.local
+proxy_env: >-
+  {{ {'HTTP_PROXY': proxy_http, 'http_proxy': proxy_http,
+      'HTTPS_PROXY': proxy_https, 'https_proxy': proxy_https,
+      'NO_PROXY': proxy_no_proxy, 'no_proxy': proxy_no_proxy}
+     if proxy_enabled | bool else {} }}
