@@ -377,8 +377,12 @@ make remove-worker WORKER=192.0.2.21
 узлах должны совпадать, или на control plane `sudo` без пароля). Несколько
 воркеров — копией `ansible/inventory/multinode.example.yml`:
 `make add-worker INVENTORY=ansible/inventory/multinode.yml` (вывести всех —
-`make remove-worker INVENTORY=… FORCE=1`). Между узлами нужны TCP 6443,
-10250 и UDP 8472.
+`make remove-worker INVENTORY=… FORCE=1`). Если воркеров больше одного,
+добавляйте их через `INVENTORY` со всеми воркерами сразу: фаервол каждого узла
+пропускает только адреса узлов из inventory, и воркер, добавленный по одному
+через `WORKER=`, не узнает адрес следующего. Между узлами (например, в
+security group облака) нужны TCP 6443, 10250, 2379–2383, 4240, 4244, 9100,
+9962–9965, 10257, 10259 и UDP 8472.
 
 `make add-worker` — 1,5–2 мин (на воркере уже стояли пакеты после
 `make destroy`; на новой машине добавится их загрузка). Повторный
