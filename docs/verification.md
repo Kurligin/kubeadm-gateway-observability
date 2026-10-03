@@ -42,7 +42,7 @@ Watchdog — до 240 с. Прогон занимает 45–90 с (на дву�
 | 5 | `/limited`: из 25 запросов (10 × 2 реплики Envoy + 5) не больше 20 успешных и хотя бы один 429 от rate limit Envoy (заголовок `x-ratelimit-limit: 10`); основной маршрут при этом отвечает 200 |
 | 6 | запрос с уникальным `X-Request-ID` → записи с этим ID в VictoriaLogs из access-логов Angie и Envoy; поддельный `X-Gateway-Route` клиента до Angie не дошёл (заменён фильтром маршрута); копия запроса (зеркало) пришла в web-v2 на теневой порт (`traffic: shadow`) |
 | 7 | Prometheus: ключевые цели (API-сервер, kubelet, controller-manager, scheduler, etcd, CoreDNS, node-exporter, kube-state-metrics, Cilium, Envoy, Envoy Gateway, web-v1/v2, Fluentd, VictoriaLogs, а при трейсинге и VictoriaTraces) `up` по `/api/v1/targets`; счётчик запросов Envoy вырос на трафик шагов 3–6 (по каждому поду Envoy); PromQL по метрикам Angie (запросы по версиям); `kubectl top nodes` и `kubectl top pods -A`; алерт Watchdog за последние 10 мин дошёл до webhook-получателя и лежит в VictoriaLogs |
-| 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway → 404; etcd `:2381` снаружи недоступен; прокси метрик etcd и node-exporter без токена → 401 или соединение сброшено; метрики Cilium `:9962` закрыты для сети (проверяется только с другой машины) |
+| 8 | Prometheus и логи без пароля → 401; `POST /-/quit` и `/insert` даже с паролем через Gateway → 404; etcd `:2381` снаружи недоступен; прокси метрик etcd (TLS проверяется по имени из его сертификата) и node-exporter без токена → 401 на узле, с другой машины — порт закрыт; метрики Cilium `:9962` закрыты для сети (проверяется только с другой машины). Закрытым считается отказ, таймаут, сброс и пустой ответ (`curl` 52 за VPN-клиентом с TUN) |
 | 9 | только при нескольких узлах: DaemonSet'ы готовы на каждом узле; Envoy и web-v1/web-v2 больше чем на одном узле; Gateway отвечает 200 по адресу каждого узла; `kubectl logs`/`top` воркера; логи подов воркера в VictoriaLogs; node-exporter и kubelet каждого узла `up` |
 | 10 | только при включённом трейсинге: запрос со сгенерированным `traceparent` → трейс с этим ID в VictoriaTraces (Jaeger API) за ≤ 60 с, в нём спан Envoy с маршрутом (`gateway.route`) и версией бэкенда (`backend.version`); этот `trace_id` в access-логе Angie в VictoriaLogs; Grafana: datasource трейсов отдаёт трейс, ссылки лог ↔ трейс настроены |
 
@@ -60,6 +60,9 @@ Watchdog — до 240 с. Прогон занимает 45–90 с (на дву�
 ```bash
 GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh
 ```
+
+Для облачной ВМ за NAT `IP` — её публичный адрес
+([operations.md](operations.md#облачная-вм-nat-и-security-group)).
 
 Итог на стенде с двумя узлами:
 
@@ -93,8 +96,8 @@ IP=$(kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].va
 PASS=$(kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | base64 -d)
 ```
 
-**С другой машины** в той же сети (замените адрес и пользователя SSH; путь —
-каталог репозитория на узле):
+**С другой машины** (замените адрес и пользователя SSH; путь — каталог
+репозитория на узле; у облачной ВМ за NAT — публичный адрес):
 
 ```bash
 IP=192.168.1.38
@@ -414,20 +417,24 @@ gwcurl -o /dev/null -w '%{http_code}\n' -u "admin:$PASS" -X POST https://logs.de
 404
 ```
 
-etcd `:2381` снаружи не слушает (`Failed to connect`), прокси метрик etcd
-без токена — 401:
+На узле: etcd `:2381` снаружи не слушает (`Failed to connect`), прокси
+метрик etcd без токена — 401:
 
 ```bash
 curl -sS -m 5 http://$IP:2381/metrics
 curl -s -o /dev/null -w '%{http_code}\n' --cacert ca.crt https://$IP:2382/metrics
 ```
 
-С другой машины: node-exporter и метрики Cilium закрыты — обе команды
-печатают `Failed to connect` (на самом узле `:9100` отвечает 401):
+С другой машины: node-exporter, метрики Cilium, kubelet и прокси метрик
+etcd закрыты — все команды печатают `Failed to connect` (на самом узле
+`:9100` и `:2382` отвечают 401; за VPN-клиентом с TUN вместо этого —
+`Empty reply from server`, см. [security.md](security.md#порты-узла-что-открыто-снаружи)):
 
 ```bash
 curl -sS -m 5 -k https://$IP:9100/metrics
 curl -sS -m 5 http://$IP:9962/metrics
+curl -sS -m 5 -k https://$IP:10250/healthz
+curl -sS -m 5 -k https://$IP:2382/metrics
 ```
 
 Сетевые политики изнутри кластера (на узле): под в `demo` не достаёт до

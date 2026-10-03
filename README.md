@@ -11,8 +11,8 @@
 ## TL;DR
 
 На Ubuntu 24.04 amd64 (4 vCPU / 8 ГБ / 30 ГБ и больше, sudo, интернет).
-`./deploy.sh` идёт ~8–10 мин, повторный запуск — ~40–50 с и ничего не
-меняет; `make verify` — 45–90 с (на двух узлах дольше): таблица проверок,
+`./deploy.sh` идёт 8–15 мин в зависимости от сети, повторный запуск —
+40–90 с и ничего не меняет; `make verify` — 45–90 с (на двух узлах дольше): таблица проверок,
 код возврата 0 — всё работает. Сеть в РФ учтена: образы Docker Hub идут через
 зеркала, чарты лежат в репозитории, ни Docker Hub, ни get.helm.sh, ни
 `*.github.io`, ни grafana.com не обязательны ([подробно](#сеть-в-рф-зеркала)).
@@ -48,7 +48,7 @@ RESULT: OK
 | Gateway API | Envoy Gateway 1.9.2, Gateway API v1.6.1 (standard): GatewayClass, Gateway, HTTPRoute → Service приложения | [Gateway API](#gateway-api) |
 | Мониторинг | Prometheus (kube-prometheus-stack), больше 20 заданий сбора: Envoy, Angie, control plane, etcd, узел, Cilium, Fluentd… | [проверка](#2-мониторинг) |
 | Логирование | Fluentd (DaemonSet) собирает access/error-логи Angie и Envoy → VictoriaLogs | [проверка](#3-логирование) |
-| Ubuntu 24.04 | проверено на Ubuntu 24.04.5 LTS (amd64) и раннере GitHub `ubuntu-24.04` | [требования](#требования-к-среде) |
+| Ubuntu 24.04 | Ubuntu 24.04.x LTS, amd64 (проверено на 24.04.4 и 24.04.5) и раннер GitHub `ubuntu-24.04` | [требования](#требования-к-среде) |
 | Автоматизация | `./deploy.sh` → Ansible (узел, кластер) + helmfile (платформа); идемпотентно | [развёртывание](#развёртывание) |
 
 ## Архитектура
@@ -92,7 +92,7 @@ default-deny, Pod Security `restricted`, генерация паролей, об
 
 | Компонент | Версия | Роль |
 |---|---|---|
-| Ubuntu | 24.04 LTS (проверено 24.04.5), amd64 | ОС узла |
+| Ubuntu | 24.04.x LTS (проверено на 24.04.4 и 24.04.5), amd64 | ОС узла |
 | Kubernetes (kubeadm, kubelet, kubectl) | **1.36.5** | кластер, создаётся `kubeadm init` |
 | containerd / runc | 2.3.6 / 1.4.3 | рантайм контейнеров |
 | Cilium | 1.20.2 | CNI, замена kube-proxy, node IPAM, Hubble |
@@ -156,8 +156,18 @@ root и интернет — напрямую или через прокси: ap
 pkgs.k8s.io), PyPI, GitHub, реестры quay.io, registry.k8s.io,
 docker.angie.software и зеркала Docker Hub ([какие](#сеть-в-рф-зеркала)).
 Проверено: ВМ Proxmox 4/8 (Ubuntu 24.04.5) — один узел и с воркером 2/4; ВМ
-2/4; раннер GitHub `ubuntu-24.04`; Vagrant (libvirt); узел только за прокси.
-Замеры — [docs/operations.md](docs/operations.md#ресурсы-память-и-диск).
+2/4; облачная ВМ 8 vCPU за NAT (Ubuntu 24.04.4, сеть РФ); раннер GitHub
+`ubuntu-24.04`; Vagrant (libvirt); узел только за прокси. Замеры —
+[docs/operations.md](docs/operations.md#ресурсы-память-и-диск).
+
+**Облачная ВМ.** У ВМ обычно приватный адрес (например, `10.0.1.4`), а
+снаружи она видна по публичному через NAT. Кластер и Gateway работают на
+приватном — ничего настраивать не нужно, но проверяют по публичному
+([ниже](#проверка)). В security group (облачном firewall) откройте входящие
+TCP 22, 80 и 443, а 6443 — только если нужен `kubectl` с другой машины.
+Остальные порты узла, нужные только кластеру (kubelet, etcd, метрики,
+Hubble), закрыты для чужих адресов самим решением (nftables,
+[docs/security.md](docs/security.md#порты-узла-что-открыто-снаружи)).
 
 ## Развёртывание
 
@@ -177,6 +187,7 @@ docker.angie.software и зеркала Docker Hub ([какие](#сеть-в-р
 | нет Ubuntu 24.04 под рукой | `vagrant up` (VirtualBox или libvirt, хост amd64) |
 | трейсинг явно | `TRACING=true ./deploy.sh` или `TRACING=false ./deploy.sh` |
 | второй узел | `make add-worker WORKER=<IP> WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519` ([ниже](#несколько-узлов)) |
+| API-сервер (6443) только для узлов и подов | `API_SERVER_OPEN=false ./deploy.sh` (тогда `kubectl` — только с узлов) |
 | удалить кластер | `make destroy FORCE=1` |
 
 ### Сеть в РФ: зеркала
@@ -253,20 +264,25 @@ make add-worker WORKER=192.0.2.21 WORKER_USER=ubuntu SSH_KEY=~/.ssh/id_ed25519
 ## Проверка
 
 **Имена для браузера и curl** — строка в `/etc/hosts` машины, с которой
-проверяете (IP — адрес узла, он же адрес Gateway; его же печатает `make ui`):
+проверяете. IP — адрес, по которому эта машина видит узел: в локальной сети
+это адрес узла (он же адрес Gateway, его печатают `make status` и `make ui`),
+у облачной ВМ за NAT — её **публичный** адрес (приватный `10.x`/`172.16–31.x`/
+`192.168.x` снаружи недоступен). `PUBLIC_IP=<публичный адрес> make status`
+(или `make ui`) печатает готовые строки с ним; само решение публичный адрес не
+угадывает и сторонние сервисы не спрашивает.
 
 ```text
 <IP> app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local traces.demo.local
 ```
 
-IP печатает команда на узле:
+Адрес узла печатает команда на узле:
 
 ```bash
 kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].value}{"\n"}'
 ```
 
-На машине проверки — этот адрес в `IP` (ниже — пример, подставьте свой) и
-строка в `/etc/hosts`:
+На машине проверки — адрес в `IP` (ниже — пример, подставьте свой; для
+облачной ВМ — публичный) и строка в `/etc/hosts`:
 
 ```bash
 IP=192.0.2.10
@@ -280,7 +296,9 @@ echo "$IP app.demo.local grafana.demo.local prometheus.demo.local alertmanager.d
 
 `make verify` на узле делает всё описанное ниже сам (около 30 проверок в 10
 шагах, 45–90 с, таблица — [docs/verification.md](docs/verification.md)); с
-другой машины: `GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh`.
+другой машины: `GATEWAY_IP=$IP CA_FILE=ca.crt UI_PASSWORD=$PASS ./scripts/verify.sh`
+(для облачной ВМ `IP` — публичный адрес; закрытые порты узла с другой машины
+засчитываются как закрытые, в том числе за VPN-клиентом с TUN).
 
 Команды ниже можно копировать целиком в bash и zsh (в том числе в zsh
 macOS по умолчанию): комментариев внутри блоков нет, ожидаемый вывод —
@@ -295,7 +313,8 @@ IP=$(kubectl -n gateway get gateway public -o jsonpath='{.status.addresses[0].va
 PASS=$(kubectl -n gateway get secret ui-basic-auth -o jsonpath='{.data.password}' | base64 -d)
 ```
 
-Или со своей машины в той же сети (адрес и пользователь SSH — ваши):
+Или со своей машины (адрес и пользователь SSH — ваши; для облачной ВМ —
+публичный адрес):
 
 ```bash
 IP=192.168.1.38
@@ -412,7 +431,7 @@ gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID 
 | Доставка алертов: Alertmanager → webhook → VictoriaLogs (Watchdog) | шаг 7 |
 | Трейсинг Envoy → VictoriaTraces, связь лог ↔ трейс в Grafana | шаг 10 |
 | UI на Gateway: basic auth, наружу только чтение | шаг 8 |
-| NetworkPolicy default-deny, Pod Security `restricted`, порты метрик узла закрыты nftables | шаг 8, [docs/security.md](docs/security.md) |
+| NetworkPolicy default-deny, Pod Security `restricted`, порты метрик и внутренние порты кластера на узле закрыты nftables | шаг 8, [docs/security.md](docs/security.md#порты-узла-что-открыто-снаружи) |
 | Пароли генерируются при деплое, секретов в git нет | `make ui` |
 | Все образы по digest, бинарники и чарты (в репозитории) по sha256, предзагрузка `make images` | `make lint`, [`images.txt`](images.txt) |
 | Сеть в РФ: зеркала Docker Hub по порядку с откатом на оригинал, запасной источник helm, чарты без github.io | [сеть в РФ](#сеть-в-рф-зеркала) |
@@ -430,6 +449,9 @@ gwcurl -u "admin:$PASS" https://traces.demo.local/select/jaeger/api/traces/$TID 
 
 - **Один control plane**, etcd без HA; IPv4, только amd64; тома local-path
   привязаны к control plane. IP узла после создания кластера не меняется.
+- **Узел за NAT** (облако): Gateway получает приватный адрес узла, публичный
+  решение не знает — его передают в `PUBLIC_IP` для подсказок и в
+  `GATEWAY_IP` для проверки с другой машины.
 - **Self-signed CA** и домен `*.demo.local`: нужны `ca.crt` и `--resolve`.
 - **Rate limit локальный** — на реплику Envoy (Gateway пропускает до 2×).
 - **Алерты не уходят из кластера** (получатель пишет их в лог); SLO за 30

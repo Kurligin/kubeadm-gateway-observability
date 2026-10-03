@@ -45,6 +45,10 @@ readonly GATEWAY_NAME=public
 readonly CA_NAMESPACE=cert-manager
 readonly CA_SECRET=demo-ca-keypair
 readonly BASIC_AUTH_SECRET=ui-basic-auth
+# etcd metrics proxy (chart etcd-metrics-proxy): port on the node and the
+# name of its Service, which its certificate holds besides the node IP.
+readonly ETCD_PROXY_PORT=2382
+readonly ETCD_PROXY_NAME=etcd-metrics.monitoring-node.svc
 # Canary: requests sent and the accepted share of v2 (weight 10 %).
 readonly CANARY_REQUESTS=200
 readonly CANARY_MIN_PCT=5
@@ -749,13 +753,34 @@ check_closed_endpoints() {
   [[ ${quit} == "404" && ${insert} == "404" ]]
 }
 
-# curl exit codes 7 (refused, also TCP reset on connect) and 28 (timeout)
-# mean nothing answered.
+# closed_port <curl exit code>: 0 and a description in $closed if the exit
+# code means that nothing behind the port answered:
+#   7   connection refused (also a TCP reset in reply to the SYN)
+#   28  timeout (packets dropped)
+#   35  TLS handshake failed: connection reset or closed during it
+#   56  connection reset while waiting for the answer
+#   52  empty reply. A VPN client with a TUN interface (common in Russia)
+#       accepts the TCP connection on this machine itself and only then
+#       tries the real one; when the node resets that, curl sees a
+#       connection that was closed without a byte of reply.
+# Any HTTP answer, a certificate error (60) and the rest mean the port is
+# open.
+closed=""
+closed_port() {
+  case $1 in
+    7) closed="connection refused/reset" ;;
+    28) closed="timeout" ;;
+    35 | 56) closed="connection reset" ;;
+    52) closed="closed without a reply (reset behind a local VPN/TUN that accepted the connection)" ;;
+    *) return 1 ;;
+  esac
+}
+
 expect_unreachable() {
   local url=$1 what=$2 rc=0 code
   code="$(curl -sS --noproxy '*' --max-time 5 -k -o /dev/null -w '%{http_code}' "${url}" 2>/dev/null)" || rc=$?
-  if [[ ${rc} -eq 7 || ${rc} -eq 28 || ${rc} -eq 56 || ${rc} -eq 35 ]]; then
-    reason="${what}: connection refused/reset (curl exit ${rc})"
+  if closed_port "${rc}"; then
+    reason="${what}: ${closed} (curl exit ${rc})"
     return 0
   fi
   reason="${what}: answered ${code:-?} (curl exit ${rc})"
@@ -766,12 +791,32 @@ check_etcd_closed() {
   expect_unreachable "http://${GATEWAY_IP}:2381/metrics" "etcd metrics :2381"
 }
 
+# The proxy's certificate names the node IP and the proxy's Service name
+# (etcd-metrics.monitoring-node.svc). From behind NAT GATEWAY_IP is the
+# public address, which is not in the certificate, so the request is sent
+# to GATEWAY_IP under the Service name (--resolve): the certificate is still
+# verified against the demo CA and a name in it, whatever address reaches
+# the node. The check is about the token: without one the proxy must answer
+# 401. From another machine the node firewall resets the connection before
+# it gets there (the port is cluster-internal), which passes too.
 check_etcd_proxy_auth() {
-  expect_code 401 "etcd metrics proxy :2382 without token" --cacert "${CA_FILE}" \
-    "https://${GATEWAY_IP}:2382/metrics"
+  local rc=0 code
+  code="$(curl -sS --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}' --cacert "${CA_FILE}" \
+    --resolve "${ETCD_PROXY_NAME}:${ETCD_PROXY_PORT}:${GATEWAY_IP}" \
+    "https://${ETCD_PROXY_NAME}:${ETCD_PROXY_PORT}/metrics" 2>/dev/null)" || rc=$?
+  if [[ ${code} == "401" ]]; then
+    reason="etcd metrics proxy :${ETCD_PROXY_PORT} without token: 401 (TLS verified as ${ETCD_PROXY_NAME})"
+    return 0
+  fi
+  if closed_port "${rc}"; then
+    reason="etcd metrics proxy :${ETCD_PROXY_PORT}: closed to this machine, ${closed} (curl exit ${rc})"
+    return 0
+  fi
+  reason="etcd metrics proxy :${ETCD_PROXY_PORT} without token: ${code:-?} (curl exit ${rc})"
+  return 1
 }
 
-# From the node itself the proxy answers 401; from outside, the metrics
+# From the node itself the proxy answers 401; from outside, the node
 # firewall resets the connection before it gets there.
 check_node_exporter() {
   local rc=0 code
@@ -780,8 +825,8 @@ check_node_exporter() {
     reason="node-exporter :9100 without token: 401"
     return 0
   fi
-  if [[ ${rc} -eq 7 || ${rc} -eq 28 || ${rc} -eq 35 || ${rc} -eq 56 ]]; then
-    reason="node-exporter :9100: closed to this machine (curl exit ${rc})"
+  if closed_port "${rc}"; then
+    reason="node-exporter :9100: closed to this machine, ${closed} (curl exit ${rc})"
     return 0
   fi
   reason="node-exporter :9100 without token: ${code:-?} (curl exit ${rc})"

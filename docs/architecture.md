@@ -27,7 +27,7 @@
 | Рантайм | Ansible, роль `containerd` | containerd и runc из официальных релизов с проверкой sha256, конфиг целиком из шаблона |
 | Kubernetes | Ansible, роли `kube_packages`, `kubeadm_init` | kubeadm/kubelet/kubectl из pkgs.k8s.io (проверка отпечатка ключа, apt pinning, hold), `kubeadm init` без kube-proxy, kubeconfig |
 | Инструменты | Ansible, роль `helm_tools` | helm, helmfile, плагин helm-diff |
-| Порты метрик на узле | Ansible, роль `node_firewall` | nftables: порты метрик Cilium, node-exporter и API cilium-health доступны только с самого узла, из сети подов и с других узлов кластера |
+| Порты узла | Ansible, роль `node_firewall` | nftables: порты метрик (Cilium, node-exporter, cilium-health) и внутренние порты кластера (kubelet, etcd, прокси метрик etcd, controller-manager, scheduler, Hubble) доступны только с самого узла, из сети подов и с других узлов кластера ([security.md](security.md#порты-узла-что-открыто-снаружи)) |
 | Воркеры | Ansible, роли `kubeadm_join`, `cluster_nodes` | `make add-worker` / `make remove-worker` (см. [«Несколько узлов»](#несколько-узлов)) |
 | Сеть, хранилище | helmfile | Cilium (kube-proxy replacement, node IPAM, Hubble), local-path-provisioner (StorageClass по умолчанию) |
 | Namespaces | чарт `charts/namespaces` | namespaces с Pod Security Admission (enforce), см. [таблицу](#namespaces-и-pod-security) |
@@ -418,14 +418,16 @@ VictoriaLogs (`/insert`). Политики — в `charts/network-policies` (с�
 - **Память control plane о воркерах** — `/etc/kubeadm-gateway/workers.json`
   (0600): обычный `./deploy.sh` на control plane не теряет воркеры
   (одобритель сертификатов kubelet и nftables их знают).
-- **Порты метрик (nftables).** Под с другого узла ходит к портам узла с
-  адресом своего узла (маскарадинг Cilium), поэтому в таблицу
+- **Порты узла (nftables).** Под с другого узла ходит к портам узла с
+  адресом своего узла (маскарадинг Cilium), API-сервер к kubelet воркера —
+  с адресом control plane, поэтому в таблицу
   `kubeadm_gateway_metrics` воркера добавлены адреса control plane и
   известных воркеров, в таблицу control plane — адреса всех воркеров.
   Таблицы уже присоединённых воркеров обновляются при добавлении следующего,
   только если они тоже перечислены в inventory (с `WORKER=` — нет); для
-  сбора метрик это не важно, но проверки cilium-health между двумя воркерами
-  без этого получают отказ — перечисляйте всех воркеров в inventory.
+  сбора метрик это не важно (Prometheus живёт на control plane), но проверки
+  cilium-health и Hubble Relay между двумя воркерами без этого получают
+  отказ — перечисляйте всех воркеров в inventory.
 - **NetworkPolicy** не менялись: Cilium различает трафик своего узла
   (`host`) и соседнего (`remote-node`), правила «от Prometheus», «от
   Fluentd» работают по identity пода и между узлами.
@@ -457,7 +459,7 @@ VictoriaLogs (`/insert`). Политики — в `charts/network-policies` (с�
 | **Fluentd → VictoriaLogs** | Filebeat; Elasticsearch/OpenSearch, Loki | Fluentd разрешён кейсом; VictoriaLogs — один под, десятки МБ памяти, LogsQL и vmui, приём штатным `out_http` без плагинов |
 | **VictoriaTraces** | Grafana Tempo, Jaeger v2 | см. таблицу ниже: память и одна экосистема с VictoriaLogs |
 | **Метрики etcd через kube-rbac-proxy** | клиентский сертификат etcd в Prometheus; etcd metrics на `0.0.0.0` | клиентский сертификат etcd не покидает узел, метрики не торчат наружу без аутентификации |
-| **nftables для портов метрик** | host firewall Cilium | host firewall при первой же политике узла запрещает всё, что не разрешено явно (риск отрезать SSH и kubelet); здесь одно узкое правило |
+| **nftables для портов метрик и внутренних портов** | host firewall Cilium | host firewall при первой же политике узла запрещает всё, что не разрешено явно (риск отрезать SSH и kubelet); здесь одно узкое правило |
 | **serverTLSBootstrap + одобритель CSR** | `--kubelet-insecure-tls` у metrics-server; kubelet-csr-approver | TLS к kubelet проверяется; отдельный контроллер — ещё один под на узле, где памяти впритык |
 | **local-path-provisioner** | Longhorn, OpenEBS | в kubeadm нет StorageClass, а Prometheus и VictoriaLogs нужен PVC; на одном узле сетевое хранилище избыточно |
 | **helmfile** | Argo CD/Flux, Kustomize | одна команда без кластера-предшественника, порядок через `needs`, diff перед изменением, повтор ничего не меняет |

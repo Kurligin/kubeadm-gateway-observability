@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Short overview of the deployment: node and versions, Gateway address, UI
 # links, Helm releases and a quick health summary. Passwords are not shown
-# here (`make ui`). Called by `make status`.
+# here (`make ui`). Called by `make status`; PUBLIC_IP: see
+# scripts/hosts-hint.sh.
 set -euo pipefail
 
 readonly DOMAIN=${DOMAIN:-demo.local}
@@ -74,10 +75,8 @@ main() {
       *) printf '  %-13s https://%s.%s/\n' "${host}" "${host}" "${DOMAIN}" ;;
     esac
   done
-  printf '\n  No DNS needed: add to /etc/hosts of your machine\n'
-  printf '    %s' "${ip:-<node IP>}"
-  for host in "${UI_HOSTS[@]}"; do printf ' %s.%s' "${host}" "${DOMAIN}"; done
-  printf '\n  or use curl --resolve app.%s:443:%s\n' "${DOMAIN}" "${ip:-<node IP>}"
+  printf '\n'
+  "$(dirname "${BASH_SOURCE[0]}")/hosts-hint.sh" "${ip}" "${UI_HOSTS[@]/%/.${DOMAIN}}"
   printf '  CA certificate for curl --cacert / the browser: make ca (writes ca.crt)\n'
   printf '  Passwords (Grafana, basic auth of Prometheus/Alertmanager/logs/traces): make ui\n'
 

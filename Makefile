@@ -32,6 +32,15 @@ HELMFILE_ARGS ?=
 # helmfile through scripts/tracing-mode.sh.
 TRACING ?= auto
 export TRACING
+# Public address of a node behind NAT (cloud VM), only for the hints of
+# `make status` / `make ui` (scripts/hosts-hint.sh); nothing is deployed
+# differently.
+PUBLIC_IP ?=
+export PUBLIC_IP
+# API server port open to every network (default) or, false, only to the
+# nodes and pods (Ansible, role node_firewall).
+API_SERVER_OPEN ?=
+export API_SERVER_OPEN
 # Parallel helm processes (diff and upgrade). Unlimited parallelism (the
 # helmfile default) overloads the API server of a 2 vCPU node on re-deploy
 # (14 diffs at once -> "TLS handshake timeout"); one per CPU is safe.
@@ -126,6 +135,8 @@ help: ## Show this help
 	@printf '  WORKER=<address>  worker for add-worker / remove-worker (WORKER_USER, SSH_KEY: login over SSH)\n'
 	@printf '  CA_FILE=<file>    where `make ca` writes the CA certificate (default: %s)\n' '$(CA_FILE)'
 	@printf '  GATEWAY_IP, UI_PASSWORD, CA_FILE  `make verify` from a machine without kubectl (see README)\n'
+	@printf '  PUBLIC_IP=<ip>    public address of a node behind NAT (cloud VM), for the /etc/hosts line of `make status` / `make ui`\n'
+	@printf '  API_SERVER_OPEN=false  API server port %s only for the nodes and pods (default: open, it needs authentication)\n' '$(API_SERVER_PORT)'
 	@printf '  TRACING=auto|true|false  distributed tracing; auto: on if the control plane has >= %s MiB and >= %s GiB disk\n' \
 		'$(TRACING_AUTO_MIN_MEMORY_MIB)' '$(TRACING_AUTO_MIN_DISK_GIB)'
 	@printf '  REGISTRY_MIRRORS_DOCKER_IO=<url,...>  Docker Hub mirrors of containerd, tried in order (empty: none; default: versions.env)\n'
@@ -198,9 +209,8 @@ ui: ## Show observability UI addresses and their credentials
 	server="$$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; server="$${server#https://}"; server="$${server%:*}"; \
 	if grep -qxF "$$server" <<<"$$addresses"; then ip="$$server"; else ip="$$(head -n1 <<<"$$addresses")"; fi; \
 	secret() { kubectl -n "$$1" get secret "$$2" -o jsonpath="{.data.$$3}" | base64 -d; }; \
-	traces=; if kubectl get namespace $(TRACING_NAMESPACE) >/dev/null 2>&1; then traces=' traces.demo.local'; fi; \
-	printf 'Observability UIs (add "%s grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local%s"\n' "$$ip" "$$traces"; \
-	printf 'to /etc/hosts, or use curl --resolve; the certificate is issued by the demo CA, see `make ca`):\n\n'; \
+	traces=; if kubectl get namespace $(TRACING_NAMESPACE) >/dev/null 2>&1; then traces=traces.demo.local; fi; \
+	printf 'Observability UIs (the certificate is issued by the demo CA, see `make ca`):\n\n'; \
 	printf '  Grafana       https://grafana.demo.local       user %s, password %s\n' \
 		"$$(secret $(MONITORING_NAMESPACE) $(GRAFANA_ADMIN_SECRET) admin-user)" \
 		"$$(secret $(MONITORING_NAMESPACE) $(GRAFANA_ADMIN_SECRET) admin-password)"; \
@@ -211,7 +221,9 @@ ui: ## Show observability UI addresses and their credentials
 	printf '  Logs (vmui)   https://logs.demo.local/select/vmui/  basic auth %s / %s\n' "$$ba_user" "$$ba_pass"; \
 	if [[ -n "$$traces" ]]; then \
 		printf '  Traces (UI)   https://traces.demo.local/select/vmui/  basic auth %s / %s (in Grafana: Explore -> Traces)\n' "$$ba_user" "$$ba_pass"; \
-	fi
+	fi; \
+	printf '\n'; \
+	./scripts/hosts-hint.sh "$$ip" app.demo.local grafana.demo.local prometheus.demo.local alertmanager.demo.local logs.demo.local $$traces
 
 ca: ## Export the demo root CA certificate to $(CA_FILE) (for curl --cacert)
 	@kubectl -n $(CA_NAMESPACE) get secret $(CA_SECRET) -o jsonpath='{.data.ca\.crt}' | base64 -d >'$(CA_FILE).tmp'
