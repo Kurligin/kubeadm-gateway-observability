@@ -1,0 +1,48 @@
+---
+# kubelet_config_settings (group_vars/all/main.yml) for a cluster created
+# before a setting existed: a new cluster gets them from the kubeadm
+# configuration. Updated in place are the kubelet configuration of this node
+# and the cluster-wide copy kubeadm uses for upgrades and joining nodes
+# (ConfigMap kube-system/kubelet-config). Restarting the kubelet does not
+# stop running pods. The settings are top-level keys of KubeletConfiguration,
+# so one line each.
+
+- name: Apply the kubelet settings to the kubelet configuration of this node
+  ansible.builtin.lineinfile:
+    path: "{{ kubeadm_init_kubelet_config }}"
+    regexp: "^{{ item.key }}:"
+    line: "{{ item.key }}: {{ item.value | to_json }}"
+  loop: "{{ kubelet_config_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value | to_json }}"
+  notify: Restart kubelet
+
+# The certificate request of tasks/kubelet_serving.yml needs the restarted
+# kubelet.
+- name: Apply a pending kubelet restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Apply the kubelet settings to the cluster-wide kubelet configuration
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      settings={{ kubelet_config_settings | to_json | quote }}
+      config="$(kubectl --namespace kube-system get configmap kubelet-config --output json)"
+      if jq -e --argjson s "${settings}" '(.data.kubelet | split("\n")) as $lines
+        | $s | to_entries | all(.[]; "\(.key): \(.value | tojson)" as $want | $lines | any(.[]; . == $want))' \
+        <<<"${config}" >/dev/null; then
+        echo unchanged
+        exit 0
+      fi
+      jq --argjson s "${settings}" '($s | to_entries) as $e
+        | .data.kubelet |= ((split("\n")
+            | map(select(. as $line | $e | any(.[]; .key as $key | $line | startswith($key + ":")) | not))
+            | join("\n") | rtrimstr("\n"))
+          + "\n" + ($e | map("\(.key): \(.value | tojson)") | join("\n")) + "\n")' <<<"${config}" |
+        kubectl replace --filename - >/dev/null
+      echo changed
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
+  register: kubeadm_init_kubelet_configmap
+  changed_when: kubeadm_init_kubelet_configmap.stdout == 'changed'

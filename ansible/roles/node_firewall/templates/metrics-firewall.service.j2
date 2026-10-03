@@ -1,6 +1,6 @@
 # {{ ansible_managed }}
 [Unit]
-Description=Restrict host metrics ports to this node and the pod network
+Description=Restrict host metrics and cluster ports to the cluster nodes and the pod network
 Documentation=file://{{ node_firewall_rules_file }}
 After=nftables.service
 Before=kubelet.service

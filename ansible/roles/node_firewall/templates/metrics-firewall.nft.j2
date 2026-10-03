@@ -1,16 +1,16 @@
 #!/usr/sbin/nft -f
 # {{ ansible_managed }}
-# Metrics ports of host-network agents: reachable from this node, from pods
-# and from the other nodes of the cluster only. Re-loading the file replaces
-# the table atomically.
+# Metrics and cluster-internal ports of host-network components: reachable
+# from this node, from pods and from the other nodes of the cluster only.
+# Re-loading the file replaces the table atomically.
 
 table inet {{ node_firewall_table }}
 delete table inet {{ node_firewall_table }}
 
 table inet {{ node_firewall_table }} {
-    set metrics_ports {
+    set restricted_ports {
         type inet_service
-        elements = { {{ node_firewall_metrics_ports | join(', ') }} }
+        elements = { {{ node_firewall_ports | join(', ') }} }
     }
 
     set allowed_v4 {
@@ -24,9 +24,9 @@ table inet {{ node_firewall_table }} {
         # other tables, so rules of Cilium or the administrator still apply.
         type filter hook input priority filter - 10; policy accept;
 
-        tcp dport != @metrics_ports accept
+        tcp dport != @restricted_ports accept
         fib saddr type local accept
         ip saddr @allowed_v4 accept
-        reject with tcp reset
+        counter reject with tcp reset
     }
 }

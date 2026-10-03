@@ -119,6 +119,23 @@
   when: kubeadm_join_role_label not in (kubeadm_join_node_json.stdout | from_json).metadata.labels
   changed_when: true
 
+# A worker that joined before a setting of kubelet_config_settings existed
+# (group_vars/all/main.yml) does not have it: a join copies the cluster-wide
+# kubelet configuration once. A worker that has just joined already has
+# them all, nothing changes. Restarting the kubelet keeps the pods running.
+- name: Apply the kubelet settings of the cluster to this worker
+  ansible.builtin.lineinfile:
+    path: "{{ kubeadm_join_kubelet_config }}"
+    regexp: "^{{ item.key }}:"
+    line: "{{ item.key }}: {{ item.value | to_json }}"
+  loop: "{{ kubelet_config_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value | to_json }}"
+  notify: Restart kubelet
+
+- name: Apply a pending kubelet restart
+  ansible.builtin.meta: flush_handlers
+
 # The kubelet asks the cluster CA for its serving certificate right after
 # the join (serverTLSBootstrap, from ConfigMap kube-system/kubelet-config).
 # The approver of the control plane signs it off with the names and

@@ -9,45 +9,13 @@
 # files/approve-kubelet-serving-csr.sh, for every node of the inventory and
 # only with the names and addresses Ansible knows for that node.
 #
-# New clusters get serverTLSBootstrap from the kubeadm configuration; for a
-# cluster created before it existed, the kubelet configuration on the node
-# and the cluster-wide copy kubeadm uses for upgrades and joining nodes
-# (ConfigMap kube-system/kubelet-config) are updated in place. Restarting
-# the kubelet does not stop running pods.
+# serverTLSBootstrap itself is one of kubelet_config_settings, applied by
+# tasks/kubelet_config.yml right before this file.
 #
 # The certificate is valid for one year; the kubelet requests a new one
 # when 70-90 % of that has passed. Pending requests are approved by every
 # `make deploy` and, in between, by an hourly systemd timer on the control
 # plane (same script, same check).
-
-- name: Enable serverTLSBootstrap in the kubelet configuration of this node
-  ansible.builtin.lineinfile:
-    path: "{{ kubeadm_init_kubelet_config }}"
-    regexp: '^serverTLSBootstrap:'
-    line: 'serverTLSBootstrap: true'
-  notify: Restart kubelet
-
-# The certificate request below needs the restarted kubelet.
-- name: Apply a pending kubelet restart
-  ansible.builtin.meta: flush_handlers
-
-- name: Enable serverTLSBootstrap in the cluster-wide kubelet configuration
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      config="$(kubectl --namespace kube-system get configmap kubelet-config --output json)"
-      if jq -e '.data.kubelet | split("\n") | any(. == "serverTLSBootstrap: true")' <<<"${config}" >/dev/null; then
-        echo unchanged
-        exit 0
-      fi
-      jq '.data.kubelet |= ((split("\n") | map(select(startswith("serverTLSBootstrap:") | not)) | join("\n") | rtrimstr("\n"))
-        + "\nserverTLSBootstrap: true\n")' <<<"${config}" | kubectl replace --filename - >/dev/null
-      echo changed
-    executable: /bin/bash
-  environment:
-    KUBECONFIG: "{{ kubeadm_init_admin_kubeconfig }}"
-  register: kubeadm_init_kubelet_configmap
-  changed_when: kubeadm_init_kubelet_configmap.stdout == 'changed'
 
 - name: Create the directory for the approver configuration
   ansible.builtin.file:

@@ -1,15 +1,14 @@
 ---
-# Plain-HTTP (or token-less) metrics ports that host-network agents open on
-# every address of the node:
+# Ports of host-network components that only the cluster itself needs.
+# They listen on every address of the node (or on the node address), so on
+# a VM with a public address they would be reachable from the Internet.
+#
+# Metrics ports, plain HTTP or token-less:
 #   9100  node-exporter (kube-rbac-proxy, needs a token anyway)
 #   8888  node-exporter kube-rbac-proxy /healthz
 #   9962  cilium-agent      9963  cilium-operator
 #   9964  cilium-envoy      9965  Hubble metrics
-#   4240  cilium-health API (health probes between the nodes, from node
-#         addresses, so it stays open to the other nodes of the cluster)
-# Only the node itself, pods (Prometheus) and the other nodes of the cluster
-# may connect; anything else gets a TCP reset. Nothing else on the node is
-# touched.
+#   4240  cilium-health API (health probes between the nodes)
 node_firewall_metrics_ports:
   - 9100
   - 8888
@@ -19,19 +18,53 @@ node_firewall_metrics_ports:
   - 9965
   - 4240
 
+# Cluster-internal ports, authenticated, but of no use to anyone outside
+# the cluster:
+#   2379  etcd clients (the API server uses 127.0.0.1)   2380  etcd peers
+#   2382  etcd metrics proxy (kube-rbac-proxy)           2383  its /healthz
+#   10250 kubelet API (API server: logs/exec; metrics-server, Prometheus)
+#   10257 kube-controller-manager, 10259 kube-scheduler (metrics, probes)
+#   4244  Hubble server of cilium-agent (Hubble Relay)
+# Who connects to them: the node itself (API server, kubelet probes), pods
+# (Prometheus, metrics-server, Hubble Relay) and the other nodes (the API
+# server of the control plane to the kubelet of a worker; a pod's traffic
+# to another node leaves its node masqueraded to the node address).
+node_firewall_cluster_ports:
+  - 2379
+  - 2380
+  - 2382
+  - 2383
+  - 10250
+  - 10257
+  - 10259
+  - 4244
+
+# The API server (6443) stays open by default: kubectl, helm and a remote
+# inventory (deployment from another machine) need it, and it requires
+# authentication (client certificate or token). false: like the ports
+# above, only this node, pods and the other nodes (environment variable
+# API_SERVER_OPEN=false of the deployment).
+node_firewall_api_server_open: true
+
+# Ports not listed here (SSH, 80/443 of the Gateway, Cilium VXLAN 8472/UDP,
+# ...) are not touched.
+node_firewall_ports: >-
+  {{ (node_firewall_metrics_ports + node_firewall_cluster_ports
+      + ([] if node_firewall_api_server_open | bool else [k8s_api_server_port | int]))
+     | map('int') | unique | sort }}
+
 # Sources allowed besides the node's own addresses.
 node_firewall_allowed_cidrs:
   - "{{ k8s_pod_subnet }}"
 
 # IPv4 addresses of the other nodes of the cluster (set by the playbooks;
-# empty on a single node). Traffic of a pod to another node's address
-# leaves its own node masqueraded to that node's address, so Prometheus on
-# one node scraping node-exporter or Cilium on another arrives from a node
-# address, not from the pod network.
+# empty on a single node).
 node_firewall_peer_addresses: []
 
 # Own nftables table, loaded by an own oneshot unit: independent of the
-# distribution's nftables.service and of the rules of Cilium.
+# distribution's nftables.service and of the rules of Cilium. (The names
+# date from when only metrics ports were restricted; kept so that an
+# update replaces the table in place.)
 node_firewall_table: kubeadm_gateway_metrics
 node_firewall_rules_file: /etc/kubeadm-gateway/metrics-firewall.nft
 node_firewall_service: kubeadm-gateway-metrics-firewall

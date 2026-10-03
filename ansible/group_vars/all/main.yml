@@ -20,11 +20,40 @@ kube_user: >-
      | default(lookup('ansible.builtin.env', 'USER'), true)
      | default('root', true) }}
 
+# API server port (6443) open to every network (default), or, with
+# API_SERVER_OPEN=false in the environment of the deployment, only to the
+# nodes of the cluster and the pods, like the other cluster-internal ports
+# (role node_firewall). Then kubectl, helm and a remote inventory work
+# only from the nodes themselves.
+node_firewall_api_server_open: "{{ lookup('ansible.builtin.env', 'API_SERVER_OPEN') | default('true', true) | bool }}"
+
 # Allow workloads on the control plane and let Cilium node IPAM use this
 # node for LoadBalancer Services. Required on a single node; kept when
 # workers join (`make add-worker`): the local-path volumes of Prometheus and
 # VictoriaLogs live on this node, and the Gateway keeps its address.
 k8s_single_node: true
+
+# Settings of the kubelet configuration (KubeletConfiguration, top-level
+# keys) on every node: in the kubeadm configuration of a new cluster, in the
+# cluster-wide copy joining workers get (ConfigMap kube-system/kubelet-config)
+# and, for nodes created before a setting existed, in
+# /var/lib/kubelet/config.yaml of the node itself (role kubeadm_init on the
+# control plane, kubeadm_join on the workers; the kubelet is restarted,
+# running pods are not).
+#   serverTLSBootstrap     serving certificate from the cluster CA (see
+#                          role kubeadm_init, tasks/kubelet_serving.yml)
+#   serializeImagePulls    false: images are pulled in parallel. By default
+#                          the kubelet pulls one image at a time, so one
+#                          slow or stalled pull (a mirror that stops
+#                          sending, up to the 5 min progress timeout of
+#                          containerd) holds back every other pod of the
+#                          node.
+#   maxParallelImagePulls  at most 3 at once, so that a slow network is not
+#                          split between too many pulls.
+kubelet_config_settings:
+  serverTLSBootstrap: true
+  serializeImagePulls: false
+  maxParallelImagePulls: 3
 
 # HTTP(S) proxy, taken from the environment of the deployment (HTTP_PROXY,
 # HTTPS_PROXY, NO_PROXY or their lower-case forms). Unset: no proxy

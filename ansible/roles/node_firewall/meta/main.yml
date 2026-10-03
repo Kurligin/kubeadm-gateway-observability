@@ -2,7 +2,7 @@
 galaxy_info:
   role_name: node_firewall
   author: kubeadm-gateway-observability
-  description: Restrict the plain-HTTP metrics ports of host-network agents to the node and the pod network (nftables).
+  description: Restrict the metrics and cluster-internal ports of host-network components to the nodes and the pod network (nftables).
   license: Apache-2.0
   min_ansible_version: "2.18"
   platforms:

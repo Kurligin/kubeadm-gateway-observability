@@ -56,7 +56,10 @@ scheduler:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
-# The kubelet asks the cluster CA for its HTTPS serving certificate (CSR,
-# approved by this role) instead of signing one itself, so that clients
-# such as metrics-server can verify it. Renewed the same way.
-serverTLSBootstrap: true
+# kubelet_config_settings (group_vars/all/main.yml): serverTLSBootstrap (the
+# kubelet asks the cluster CA for its HTTPS serving certificate, approved by
+# this role, so that clients such as metrics-server can verify it) and
+# parallel image pulls.
+{% for key, value in kubelet_config_settings.items() %}
+{{ key }}: {{ value | to_json }}
+{% endfor %}
